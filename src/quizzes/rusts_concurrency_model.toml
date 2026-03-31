@@ -1,0 +1,57 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = "The Meridian session registry stores an `Arc<Mutex<HashMap<SatelliteId, SessionState>>>`. A colleague proposes replacing `Arc` with `Rc` to avoid the cost of atomic reference counting. Under what conditions is this change safe?"
+prompt.distractors = [
+    "It is safe as long as all threads acquire the `Mutex` before accessing the `HashMap`.",
+    "It is safe on x86 architectures where non-atomic increments are effectively atomic due to cache coherence.",
+    "It is never safe because `Rc` does not implement `Deref` and cannot be dereferenced inside a `Mutex` guard."
+]
+answer.answer = "It is safe only if the registry is accessed exclusively from a single thread — `Rc` is not `Send` and cannot be moved across thread boundaries."
+context = "`Rc<T>` does not implement `Send`, so the compiler prevents it from being moved into a thread spawn closure or across any thread boundary. It is safe to use `Rc` only when the value is accessed exclusively on a single thread. C is wrong: x86 cache coherence does not make non-atomic operations atomic from the perspective of the Rust memory model — the compiler may reorder or split them, producing incorrect behavior. D is wrong: `Rc<T>` implements `Deref<Target = T>`, so dereferencing works fine; the problem is thread safety, not dereferencing."
+id = "45b064a1-690b-4333-8fad-cbf23a475511"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = "Review this code:\n\n```rust\nfn dispatch_next_command(queue: &Arc<Mutex<VecDeque<Command>>>) {\n    if let Some(cmd) = queue.lock().unwrap().pop_front() {\n        send_to_satellite(cmd); // network I/O — takes ~50ms\n    }\n}\n```\n\nA second thread calls `dispatch_next_command` concurrently. What is the actual behavior?"
+prompt.distractors = [
+    "The second thread will deadlock because the `MutexGuard` is never dropped.",
+    "The second thread will proceed immediately because `if let` patterns drop temporaries before executing the arm body.",
+    "The code will fail to compile because `MutexGuard` does not implement `Send` and cannot be held across an `if let`."
+]
+answer.answer = "The second thread will block for approximately 50ms while `send_to_satellite` runs, because the `MutexGuard` lives until the closing brace of the `if let` block."
+context = "In an `if let` expression, temporaries produced in the pattern — including the `MutexGuard` returned by `.lock()` — live until the closing brace of the arm, not just the condition. The second thread will block on `queue.lock()` for the full duration of `send_to_satellite`. The fix is a separate `let` binding: `let cmd = queue.lock().unwrap().pop_front();` — the guard drops at the semicolon, and the `if let` runs with the lock released. The lock is eventually released when the guard drops; there's no deadlock and the code compiles."
+id = "5e76c263-16a8-4c04-b555-06b0c2302feb"
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = "A Meridian component uses `Arc<RwLock<StationConfigMap>>` for a configuration registry read by packet handlers thousands of times per second. A configuration update arrives. Which statement best describes the behavior at the point the writer calls `.write()`?"
+prompt.distractors = [
+    "The writer acquires the write lock immediately, regardless of how many readers currently hold read guards.",
+    "The writer blocks until all current readers release their guards, but new readers can continue to acquire the read lock, potentially causing the writer to wait indefinitely.",
+    "The write lock is incompatible with outstanding read guards, so the call to `.write()` returns an `Err` that must be retried."
+]
+answer.answer = "The writer blocks until all current readers release their guards. On most platforms, new readers attempting to acquire the read lock while the writer is waiting are also blocked, preventing writer starvation."
+context = "The writer blocks until existing read guards are dropped. Most `RwLock` implementations — including the platform implementations used by Rust's standard library on Linux and Windows — block new readers once a writer is waiting, preventing starvation. One answer describes a starvation scenario that most implementations actively prevent, though the behavior is platform-dependent and not guaranteed by the standard library's API contract. The write lock is exclusive and cannot be acquired while any reader holds a guard. `write()` blocks, it does not return an error."
+id = "a5a887c8-a5e7-41f2-b0d9-b7ca21ee7dbe"
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = "A Meridian engineer writes a type that wraps a raw pointer to a hardware telemetry register:\n\n```rust\nstruct TelemetryRegister {\n    ptr: *mut u32,\n}\n```\n\nThe engineer needs to send this across a thread boundary. What is required, and what does it mean?"
+prompt.distractors = [
+    "Nothing is required — raw pointers implement `Send` because they have no associated lifetime.",
+    "The engineer must wrap `ptr` in an `Arc` to make the type `Send`.",
+    "The engineer must add `#[derive(Send)]` to the struct definition."
+]
+answer.answer = "The engineer must implement `unsafe impl Send for TelemetryRegister {}`, which is a promise to the compiler that concurrent access to the pointed-to memory is safe — a guarantee the engineer must manually verify."
+context = "Raw pointers (`*mut T`, `*const T`) are neither `Send` nor `Sync` because the compiler cannot reason about what they represent or whether concurrent access is safe. To send a type containing a raw pointer across a thread boundary, the engineer must write `unsafe impl Send for TelemetryRegister {}`, explicitly asserting to the compiler that this is safe. This is a soundness promise — if the assertion is wrong and the code causes a data race, the responsibility is the engineer's. Raw pointers explicitly do not implement `Send`. Wrapping in `Arc` shares the pointer, it doesn't make the dereference safe. `Send` is not derivable."
+id = "44eea1fc-2eac-43bb-8da7-ceb88379ead9"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = "Two threads in the Meridian control plane each hold a `MutexGuard` for different resources and attempt to acquire the other's lock:\n\n- Thread A holds lock on `SESSION_MAP`, attempts to acquire `CONFIG_MAP`\n- Thread B holds lock on `CONFIG_MAP`, attempts to acquire `SESSION_MAP`\n\nWhat will Rust's type system or runtime do to prevent or detect this?"
+prompt.distractors = [
+    "The borrow checker will detect the circular dependency at compile time and emit an error.",
+    "`std::sync::Mutex` will detect the deadlock at runtime and return an `Err` from the second `.lock()` call.",
+    "Rust's ownership system prevents this because a thread cannot hold two `MutexGuard` values simultaneously."
+]
+answer.answer = "Neither the type system nor the runtime will detect this. Both threads will block indefinitely. Deadlock prevention is the programmer's responsibility."
+context = "Rust eliminates data races at compile time through `Send` and `Sync`, but it provides no deadlock detection. `std::sync::Mutex` will block indefinitely when a thread attempts to acquire a lock held by another thread — there is no timeout, no cycle detection, and no `Err` returned. The standard mitigations are: establish a consistent global lock acquisition order (always acquire `SESSION_MAP` before `CONFIG_MAP`, everywhere in the codebase), minimize lock scope to reduce the window where two locks must be held simultaneously, and prefer data structures that require only a single lock. The borrow checker has no model of lock ordering. `Mutex::lock()` only returns `Err` in the lock-poisoning case, not on deadlock. A thread can hold multiple `MutexGuard` values simultaneously; that is precisely what creates the deadlock condition."
+id = "f0e69a14-5613-4211-bb71-1afecf073595"

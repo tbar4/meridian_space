@@ -1,0 +1,8 @@
+[book]
+title = "Meridian Space"
+authors = ["Trevor Barnes"]
+language = "en"
+
+# mdbook-quiz incomptaible with mdbook >= 0.5.0
+[preprocessor.quiz]
+#[preprocessor.callouts]
