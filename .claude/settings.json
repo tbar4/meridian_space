@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git push:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(git rm:*)",
+      "Bash(git reset:*)",
+      "Bash(rm -rf /Users/tbarnes/projects/mdbook/meridian_space/.git /Users/tbarnes/projects/mdbook/meridian_space/.jj)",
+      "Bash(git init:*)",
+      "Bash(git remote:*)"
+    ]
+  }
+}
