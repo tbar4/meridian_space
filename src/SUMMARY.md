@@ -13,6 +13,7 @@
   - [Threads vs Async](./module02_concurrency_primitives/threads_vs_async.md)
   - [Shared State](./module02_concurrency_primitives/shared_state.md)
   - [Atomics](./module02_concurrency_primitives/atomics.md)
+  - [Project: Command Queue](./module02_concurrency_primitives/project_command_queue.md)
 ---
 - [Module 3: Message Passing Patterns](./module03_message_passing_patterns/README.md)
   - [MPSC](./module03_message_passing_patterns/mpsc.md)
