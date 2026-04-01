@@ -10,3 +10,7 @@ edition = "2024"
 
 [output.html]
 playground.editable = true
+
+[preprocessor.toc]
+command = "mdbook-toc"
+renderer = ["html"]

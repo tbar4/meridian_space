@@ -6,7 +6,8 @@
 **Quiz pass threshold:** 70% on all three lessons to unlock the project
 
 ---
-
+<!-- toc -->
+---
 ## Mission Context
 
 Module 2 built shared-state concurrency: `Mutex`, `RwLock`, atomics. Those primitives protect data that multiple actors need to touch. This module takes the complementary approach: instead of sharing data, pass ownership through channels. Producers and consumers are decoupled — each owns its state exclusively, communicating only through typed messages.

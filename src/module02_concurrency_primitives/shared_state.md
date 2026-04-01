@@ -5,7 +5,8 @@
 **Source:** *Rust Atomics and Locks* — Mara Bos, Chapter 1
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The Meridian command queue maintains a shared priority table: incoming operator commands are written by the command ingress task, read by the session dispatch task, and occasionally queried by the monitoring dashboard. The Python system used a global dictionary with a threading lock. In production, that lock has been involved in three separate deadlock incidents — two in the same deployment week — all caused by the same root pattern: lock acquired, function called, that function also acquires the same lock.

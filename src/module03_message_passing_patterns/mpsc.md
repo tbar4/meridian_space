@@ -5,7 +5,8 @@
 **Source:** *Async Rust* — Maxwell Flitton & Caroline Morton, Chapter 8
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 Module 2's command queue used a `Mutex<BinaryHeap>` plus a `Condvar` to share state between threads. That approach works, but it couples the producers and consumer through a shared data structure — every access requires acquiring the same lock, and the consumer must hold the lock while inspecting queue contents. Under contention at 48-uplink load, that lock becomes a bottleneck.

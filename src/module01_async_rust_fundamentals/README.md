@@ -6,7 +6,8 @@
 **Quiz pass threshold:** 70% on all three lessons to unlock the project
 
 ---
-
+<!-- toc -->
+---
 ## Mission Context
 
 Meridian's legacy Python control plane was built for a 6-satellite constellation. It handles ground station connections sequentially: one connection at a time, blocking on each telemetry frame before moving to the next. At 48 satellites across 12 ground station sites, this architecture is the primary bottleneck in the control plane. During peak pass windows, the broker accumulates up to 40 seconds of delivery lag — unacceptable for conjunction avoidance workflows that require sub-10-second frame delivery.

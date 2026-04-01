@@ -5,7 +5,8 @@
 **Source:** *Async Rust* — Maxwell Flitton & Caroline Morton, Chapters 1–2
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 Meridian's legacy Python control plane was designed for a 6-satellite constellation. It handles ground station connections sequentially: accept a connection, process its telemetry frame, move to the next connection. At 6 satellites, this was acceptable. At 48 satellites across 12 ground station sites, it is a bottleneck. A single slow uplink from a station in the Atacama Desert holds up frames from every other active connection. The Python GIL makes true parallelism on this I/O-bound workload impossible without forking processes, which multiplies memory overhead and complicates shared state.

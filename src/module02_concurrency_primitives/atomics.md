@@ -5,7 +5,8 @@
 **Source:** *Rust Atomics and Locks* — Mara Bos, Chapters 2–3
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The Meridian control plane increments a frame counter every time a telemetry frame is received — 4,800 times per second at full uplink load across 48 satellites. The per-session heartbeat timer fires every 100ms. The frame drop rate is sampled by the monitoring dashboard every second. None of these operations need the overhead of a mutex lock. They need a single integer that multiple threads can read and write without data races.

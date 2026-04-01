@@ -6,7 +6,8 @@
 **Quiz pass threshold:** 70% on all three lessons to unlock the project
 
 ---
-
+<!-- toc -->
+---
 ## Mission Context
 
 The Meridian control plane is not a purely async system. The async runtime handles the high-frequency I/O path. But the control plane also runs CPU-bound conjunction checks, synchronous vendor libraries with C FFI, a shared priority command table written by multiple connections and read by the session dispatcher, and lock-free statistics counters sampled by the monitoring dashboard.

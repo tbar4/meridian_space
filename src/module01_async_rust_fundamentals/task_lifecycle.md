@@ -5,6 +5,8 @@
 **Source:** *Async Rust* — Maxwell Flitton & Caroline Morton, Chapters 2, 7
 
 ---
+<!-- toc -->
+---
 
 ## Context
 

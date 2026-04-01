@@ -5,7 +5,8 @@
 **Source:** *Async Rust* — Maxwell Flitton & Caroline Morton, Chapter 7
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The Meridian control plane receives telemetry from 48 satellite uplinks simultaneously. Each uplink connection is long-lived: a ground station holds a persistent TCP session with the control plane and streams frames at irregular intervals driven by orbital geometry and antenna alignment. Alongside these connections, the control plane runs housekeeping tasks — session health checks, TLE refresh from the catalog, and periodic flush of buffered frames to the downstream aggregator.
@@ -209,4 +210,7 @@ The double `?` on `.await.map_err(...)??` deserves explanation: `spawn_blocking`
 - `tokio::spawn` creates a task with `'static` lifetime. If you need to share data from the spawning scope, move it into the closure with `async move`, wrap it in `Arc`, or communicate via channels.
 
 - Multiple runtimes in the same process are a valid pattern for resource isolation. Ingress and housekeeping workloads with fundamentally different resource profiles benefit from separate thread pools rather than competing on a shared executor.
+
+---
+
 {{#quiz module1-lesson-02-quiz.toml}}

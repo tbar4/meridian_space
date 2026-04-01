@@ -5,7 +5,8 @@
 **Source:** *Rust Atomics and Locks* — Mara Bos, Chapter 1
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The Meridian control plane is not a purely async system. The async runtime handles the high-frequency path — accepting ground station connections, reading telemetry frames, routing them to downstream consumers. But the control plane also runs work that has no business on an async worker thread: a vendor-supplied TLE validation library with a synchronous C FFI, a CPU-intensive conjunction check that processes several hundred orbital elements per pass, and a legacy configuration parser that performs synchronous file I/O.

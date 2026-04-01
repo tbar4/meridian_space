@@ -5,7 +5,8 @@
 **Source:** *Async Rust* — Maxwell Flitton & Caroline Morton, Chapters 6, 7
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 MPSC channels move work from many producers to one consumer. The inverse problem is fan-out: distributing one event to many consumers. The Meridian control plane has two distinct fan-out requirements that call for different solutions.

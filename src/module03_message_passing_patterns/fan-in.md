@@ -5,7 +5,8 @@
 **Source:** *Async Rust* — Maxwell Flitton & Caroline Morton, Chapters 3, 8
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 Lesson 1 covered moving data from many producers to one consumer via MPSC. That is fan-in at its simplest: all producers push to the same channel. But the Meridian aggregator's real requirements are more demanding. The 48 uplink sessions produce at different rates. Archived replay feeds produce at a different priority level than live feeds. A session that goes silent should not block the aggregator from processing the other 47. A priority command frame from a SAFE_MODE event should not wait behind a queue of housekeeping frames.
