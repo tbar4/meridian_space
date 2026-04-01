@@ -1,0 +1,125 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use `mpsc` — the shutdown signal is consumed exactly once by each task.",
+  "Use `broadcast` — the shutdown event is sent once and every task receives it.",
+  "Use `oneshot` — it is a single-message channel appropriate for one-time signals."
+]
+prompt.prompt = """
+The Meridian control plane needs a shutdown signal that all active tasks can observe.
+Tasks may be spawned before or after the signal is sent. Which channel primitive is
+correct and why?
+"""
+answer.answer = "Use `watch` — tasks that come online after the shutdown is signalled need to see `true` immediately from `borrow()`. A `broadcast` receiver created after the send would miss the message."
+context = """
+`watch` always exposes the *current* value. A task spawned after shutdown is signalled
+will call `borrow()` and immediately see `true` — it does not need to wait for a message.
+A `broadcast` receiver is created at a specific point in the ring buffer — messages sent
+before the subscription are not visible to that receiver. For a shutdown flag, where latecomers
+need to see the current state immediately, `watch` is the correct choice. `oneshot` can only
+have one receiver, so it cannot serve many tasks.
+"""
+id = "cd29214d-257d-4685-8e51-d913dc282123"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "The receiver permanently fails — a lagged receiver cannot receive further messages.",
+  "The channel drops the slowest receiver to protect faster ones.",
+  "The next `recv()` call blocks indefinitely until all missing messages are resent."
+]
+prompt.prompt = """
+A Meridian session task falls behind on a `broadcast` channel with capacity 32. When the
+task finally calls `recv()` after falling 40 messages behind, what happens?
+"""
+answer.answer = "`recv()` returns `Err(RecvError::Lagged(n))` indicating `n` messages were missed. The receiver continues to work and will receive all subsequent messages normally."
+context = """
+`RecvError::Lagged(n)` is a soft error, not a fatal one. The receiver's position in the
+ring buffer has been advanced past the lost messages. It can continue receiving — the next
+`recv()` will return the next available message after the gap. The application must decide
+whether missing messages is acceptable (e.g., TLE updates that can be resynchronised) or
+requires action (e.g., requesting a full resync). Never silently ignore `Lagged` — always
+log it or trigger appropriate recovery.
+"""
+id = "4ceedb7d-430c-4b31-b9a6-7519e845fbde"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "first\nfirst"
+prompt.program = """
+use std::sync::mpsc;
+
+fn main() {
+    let (tx, rx) = mpsc::channel::<String>();
+
+    // Two receivers reading the same channel
+    // Simulate watch::channel behaviour manually
+    let v = std::sync::Arc::new(std::sync::Mutex::new("first".to_string()));
+    let v2 = std::sync::Arc::clone(&v);
+
+    let t = std::thread::spawn(move || {
+        println!("{}", v2.lock().unwrap().clone());
+    });
+
+    println!("{}", v.lock().unwrap().clone());
+    t.join().unwrap();
+    drop(rx); drop(tx);
+}
+"""
+context = """
+Both threads read "first" from the shared Arc<Mutex<String>>. The Arc::clone means both
+point to the same allocation. Neither thread modifies the value, so both read "first".
+The output is "first" twice, though the order between the two threads is non-deterministic —
+the main thread's println may run before or after the spawned thread's, but both print "first".
+This illustrates the pattern behind `watch`: a shared current value that multiple readers
+can observe simultaneously.
+"""
+id = "b8c38678-4da4-4f5e-9682-71675464157e"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use `broadcast` — each session needs its own copy of every config value.",
+  "Use `mpsc` — the config manager sends updates to each session individually.",
+  "Use a `static Mutex<Config>` — global state is the simplest approach for shared config."
+]
+prompt.prompt = """
+The Meridian control plane has a `ControlPlaneConfig` struct that is loaded at startup
+and occasionally updated via a management API. All 48 session tasks need to read the
+current config frequently and react when it changes. Which distribution mechanism is
+most appropriate?
+"""
+answer.answer = "Use `watch::channel(Arc<Config>)` — sessions `borrow()` the current config without locking, and `changed().await` notifies them of reloads efficiently."
+context = """
+`watch` is purpose-built for this: one sender, many receivers, always-current value.
+`borrow()` is lock-free — it does not yield and does not acquire any lock. Wrapping the
+config in `Arc<Config>` avoids copying the struct on every `borrow()`. `broadcast` would
+require each session to maintain its own copy and handle `Lagged` errors for a config value
+where only the latest matters. A `static Mutex` is a single global lock contended by all
+48 sessions on every read — a bottleneck at scale.
+"""
+id = "eb1a4576-3fc2-438a-b8fe-34962aea60ac"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "`mpsc` and `broadcast` — `watch` is only for boolean flags.",
+  "`broadcast` and `oneshot` — `watch` does not support multiple concurrent readers.",
+  "`mpsc` and `watch` — `broadcast` is redundant when `mpsc` can be used with multiple senders."
+]
+prompt.prompt = """
+The Meridian control plane has two distinct fan-out needs: (1) a TLE catalog update that
+every active session must process, and (2) a session configuration value that tasks read
+on demand and react to when changed. Which two Tokio channel types map to these needs?
+"""
+answer.answer = "`broadcast` for events where every subscriber must receive every message; `watch` for state where only the latest value matters and intermediate updates can be missed."
+context = """
+`broadcast` ensures every subscriber receives every message from the point of subscription.
+It is correct for events — like a TLE update — where missing one would leave a session
+with stale orbital data. `watch` always exposes the latest value; intermediate updates
+may be missed. It is correct for state — like configuration — where only the current value
+matters. Using `broadcast` for config would require every session to consume every config
+version in order, and would leave tasks that miss an update with a stale config permanently.
+"""
+id = "a7614383-f88a-4859-afa4-31e408218317"

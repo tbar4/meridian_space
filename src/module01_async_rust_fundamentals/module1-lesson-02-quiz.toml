@@ -1,0 +1,122 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "The TLE import tasks are spawned with `tokio::spawn`, which creates too many tasks on the global queue.",
+  "The multi-thread scheduler's work-stealing causes cache thrashing during the import.",
+  "The ingress runtime has too few worker threads to handle 48 sessions simultaneously."
+]
+prompt.prompt = """
+The Meridian ingress service processes 48 concurrent uplink sessions. An engineer
+notices that during TLE catalog bulk imports (which call a synchronous HTTP client
+and write to disk), the P99 latency on active uplink sessions spikes from 2ms to 800ms.
+What is the most direct cause?
+"""
+answer.answer = "The synchronous HTTP client and disk write are running on async worker threads, blocking them for the duration of the import and starving uplink session tasks."
+context = """
+Blocking calls on async worker threads reduce the effective worker count. If all workers are blocked on I/O,
+no other tasks can be polled. The fix is `tokio::task::spawn_blocking(|| { /* sync import code */ }).await`,
+which routes the blocking work to the dedicated blocking thread pool, leaving async worker threads free to
+service uplink sessions.
+"""
+id = "0dff026f-4a79-42af-82e6-fcd34c30abfc"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "It panics with a `RuntimeError` because `max_blocking_threads` is exceeded.",
+  "It runs immediately on an async worker thread since no blocking threads are available.",
+  "It is silently dropped and the `JoinHandle` resolves to an error."
+]
+prompt.prompt = """
+An engineer configures the Meridian control plane runtime as follows:
+
+```rust
+Builder::new_multi_thread()
+    .worker_threads(16)
+    .max_blocking_threads(2)
+    .build()
+```
+
+The machine has 8 logical CPU cores. Under a load spike where 10 concurrent TLE
+imports each call `spawn_blocking`, what happens to the 11th import that arrives?
+"""
+answer.answer = "It queues until one of the 2 blocking threads becomes available — `spawn_blocking` does not fail, it backs up."
+context = """
+`max_blocking_threads` is a cap on concurrent blocking threads, not a hard failure limit. Calls to `spawn_blocking`
+that exceed the cap are queued. The `JoinHandle` future will simply remain pending until a blocking thread slot opens.
+Setting `max_blocking_threads` too low (2 here) will cause import latency to spike under concurrency.
+"""
+id = "4cdeb38f-b19f-4288-9b1e-aa1802c5fb05"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "The spawned task is immediately cancelled and its `JoinHandle` resolves to `Err(JoinError)`.",
+  "The spawned task is paused until another handle to it is created and awaited.",
+  "Dropping a `JoinHandle` without awaiting it is a compile error — handles must be awaited."
+]
+prompt.prompt = """
+A Meridian engineer spawns a task to pre-fetch a TLE update, then drops the `JoinHandle`
+without awaiting it. The engineer moves on to other work. What happens to the spawned task?
+
+```rust
+let handle = tokio::spawn(async { prefetch_tle().await });
+drop(handle);
+// ... continue with other work
+```
+"""
+answer.answer = "The spawned task continues running independently. Dropping the handle only discards the ability to retrieve its output or cancel it."
+context = """
+Dropping a `JoinHandle` does not cancel the spawned task. The task is owned by the runtime, not by the handle.
+The handle is only a way to retrieve the task's output or cancel it — dropping it relinquishes that capability
+without affecting the task itself. If you need the task to stop when the handle is dropped, wrap it in a type
+that calls `.abort()` on drop, such as `tokio_util::task::AbortOnDropHandle`.
+"""
+id = "58c54b8e-b1b4-44b9-8960-7c69db98dc0d"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Pass a `&ConnectionPool` reference into each `async move { }` block — Rust will extend the lifetime automatically.",
+  "Use `std::sync::Mutex<ConnectionPool>` and clone it into each task — `Mutex` implements `Clone`.",
+  "Store the pool in a `thread_local!` — each worker thread will have its own copy."
+]
+prompt.prompt = """
+The Meridian control plane needs to share a connection pool across all 48 spawned
+uplink tasks. The connection pool is not `Copy`. Which approach correctly shares it
+across `tokio::spawn` boundaries?
+"""
+answer.answer = "Wrap the pool in `Arc<ConnectionPool>` and clone the `Arc` into each `async move { }` block — `Arc` is cheap to clone and satisfies the `'static` bound."
+context = """
+`tokio::spawn` requires `'static` — tasks cannot hold borrows into the spawning scope. `Arc` provides shared
+ownership with `'static` lifetime. Cloning an `Arc` increments a reference count (one atomic increment);
+it does not clone the underlying data. A `&ConnectionPool` reference would not satisfy `'static` and will not compile.
+`thread_local!` gives each worker thread its own pool — appropriate for some use cases but not shared pool management.
+"""
+id = "457eeba6-7175-44eb-955b-2c1f25586e02"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Config B, because more worker threads means more tasks can be polled simultaneously, increasing throughput.",
+  "Config A, because each uplink connection needs a dedicated worker thread to avoid contention.",
+  "They perform identically — thread count has no effect on I/O-bound workloads."
+]
+prompt.prompt = """
+A Meridian engineer benchmarks two runtime configurations on an 8-core machine
+handling 1000 concurrent I/O-bound uplink connections:
+
+- Config A: `.worker_threads(8)` — one per logical core
+- Config B: `.worker_threads(64)` — 8x oversubscription
+
+For a workload that is almost entirely network I/O with no CPU computation, which
+configuration performs better and why?
+"""
+answer.answer = "Config A, because I/O-bound tasks spend nearly all their time waiting (pending), so 8 workers can service 1000 tasks. Oversubscribing with 64 threads adds context-switching overhead without throughput benefit."
+context = """
+Async tasks are lightweight precisely because they do not hold a thread while waiting. Eight worker threads can
+manage thousands of pending I/O tasks — each thread polls whatever is ready, then moves on. Adding threads beyond
+the core count increases OS scheduler overhead and cache pressure without adding concurrency, since the bottleneck
+is network bandwidth and latency, not CPU. More threads help only when you have more CPU-bound work than cores.
+"""
+id = "6724019b-472b-448b-aaca-4c3877046ee3"

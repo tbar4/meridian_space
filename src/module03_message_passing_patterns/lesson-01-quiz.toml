@@ -1,0 +1,120 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "The channel closes immediately when `rx` is dropped.",
+  "The channel closes when the sender sends a special `None` sentinel value.",
+  "The channel stays open indefinitely — `recv()` never returns `None` in a bounded channel."
+]
+prompt.prompt = """
+A Meridian engineer spawns 48 uplink session tasks, each holding a cloned `Sender`.
+When should the consumer's `while let Some(msg) = rx.recv().await` loop terminate?
+"""
+answer.answer = "`recv()` returns `None` when all `Sender` clones have been dropped. The channel closes automatically when no senders remain."
+context = """
+The MPSC channel's lifetime is tied to the `Sender` handles, not the `Receiver`. When every
+`Sender` clone is dropped, the channel is considered closed and `recv()` returns `None`.
+This is the natural shutdown mechanism: when all producers are done, the consumer exits
+without any explicit close call. If any `Sender` clone is accidentally kept alive (e.g., the
+original `tx` is not dropped after cloning), the consumer loop blocks forever.
+"""
+id = "38bed131-2d0f-4b0f-98ed-f5e1fd41d57f"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use `unbounded_channel()` — it never blocks, so the producer never needs to yield.",
+  "Increase the channel capacity to a very large number so the producer rarely yields.",
+  "Use `try_send` in a loop — retry until the channel has space."
+]
+prompt.prompt = """
+The Meridian telemetry aggregator is slower than the 48 uplink producers during a peak
+pass window. What mechanism prevents the producers from generating frames faster than
+the aggregator can consume them, without dropping frames or busy-looping?
+"""
+answer.answer = "Use `send().await` with a bounded channel. When the channel is full, `send` yields and the async executor schedules other work — this is cooperative backpressure."
+context = """
+A bounded `mpsc::channel(capacity)` combined with `send().await` is the canonical
+backpressure mechanism. When the channel is full, `send().await` yields — the producer
+task is parked until the aggregator drains a slot. Other tasks (including other producers
+and the aggregator itself) can run during that wait. Unbounded channels do not apply
+backpressure — they buffer without limit, which can cause OOM under sustained overload.
+`try_send` in a retry loop is busy-polling and wastes CPU.
+"""
+id = "e9b6e609-aa7b-4d89-8133-b6589e40082d"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "done"
+prompt.program = """
+use std::sync::mpsc;
+
+fn main() {
+    let (tx, rx) = mpsc::channel::<String>();
+    let tx2 = tx.clone();
+
+    let t = std::thread::spawn(move || {
+        rx.recv().unwrap();
+    });
+
+    tx.send("hello".to_string()).unwrap();
+    // tx2 is still alive — does the thread exit?
+    t.join().unwrap();
+    println!("done");
+}
+"""
+context = """
+This does NOT fail to compile — it compiles fine. However, there is a runtime issue:
+`rx.recv()` receives "hello" and the thread exits. `join()` succeeds and "done" prints.
+`tx2` is dropped at end of `main` after `join()`, which is fine. The program completes
+normally. This question tests understanding that the *thread* only needs to receive one
+message (which it does), so `join()` does not deadlock even though `tx2` is still alive.
+The `tx2` clone does NOT cause the channel to block the thread — the thread exits after
+receiving one message, not when all senders drop.
+"""
+id = "92ee0912-6326-46ca-a942-bd2bbfbee267"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use `mpsc::Sender::clone()` for the reply — the aggregator sends back through the same channel.",
+  "Use `Arc<Mutex<Option<Response>>>` shared between the caller and aggregator.",
+  "Use a second `mpsc` channel dedicated to responses, shared across all callers."
+]
+prompt.prompt = """
+A Meridian monitoring task needs to query the aggregator actor for its current buffer depth
+and wait for the response before continuing. What is the correct async pattern?
+"""
+answer.answer = "Embed a `oneshot::Sender<Response>` inside the request message. The aggregator sends the response through it; the caller awaits the `oneshot::Receiver`."
+context = """
+The oneshot channel is purpose-built for one-shot request-response: create a
+`(reply_tx, reply_rx)` pair, embed `reply_tx` in the request message, send it to the actor,
+and await `reply_rx`. The actor handles the request and sends the response through `reply_tx`.
+The `oneshot::Sender` is consumed on send — it cannot respond twice, which is enforced
+at compile time. A shared `mpsc` response channel would not distinguish which reply
+belongs to which request. A mutex would add unnecessary synchronization overhead.
+"""
+id = "a1ba921d-9348-4e3a-b954-a49bd7c83cdd"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "The actor model is slower than shared state because every operation requires two channel operations.",
+  "Actor state can be shared between actors by cloning the `Sender` handle.",
+  "The actor's message loop can be safely called concurrently from multiple tasks."
+]
+prompt.prompt = """
+What is the core safety property of the actor pattern, and how does it differ from
+protecting state with `Arc<Mutex<T>>`?
+"""
+answer.answer = "Actor state is owned exclusively by the actor task. All mutations happen sequentially in the message loop — concurrent safety is structural, not from locks."
+context = """
+An actor owns its state with no shared references. There is no `Arc`, no `Mutex`, no
+possibility of concurrent access — only one task (the actor) ever touches the state, and it
+does so sequentially. With `Arc<Mutex<T>>`, any number of tasks can attempt to acquire
+the lock concurrently; the mutex serializes access at runtime. The actor achieves the same
+serialization structurally, without any locking overhead. The tradeoff: all operations on
+actor state are async (a channel send + await), and the actor is a serialisation point
+if many callers need simultaneous responses.
+"""
+id = "e64fe1b1-f33d-4f76-8ad4-10b5b12cce34"

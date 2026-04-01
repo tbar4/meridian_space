@@ -1,0 +1,150 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "`try_recv` is not an async operation and cannot be used inside `poll`.",
+  "The future returns `Poll::Pending` before the buffer has been initialized.",
+  "The `poll` signature requires `&mut Context<'_>` to be named `cx` — using `_cx` is undefined behavior."
+]
+prompt.prompt = """
+A Meridian engineer writes the following custom future. After deploying it, ground station
+connections occasionally hang indefinitely with no error logged. What is the most likely cause?
+
+```rust
+impl Future for GroundStationFuture {
+    type Output = Frame;
+
+    fn poll(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.buffer.try_recv() {
+            Ok(frame) => Poll::Ready(frame),
+            Err(_) => Poll::Pending,
+        }
+    }
+}
+```
+"""
+answer.answer = "The context's waker is never registered. When `poll` returns `Pending`, nothing will reschedule this task, so it parks forever."
+context = """
+The waker contract: if `poll` returns `Poll::Pending`, the future must arrange for `cx.waker()` to be called
+when the awaited resource becomes available. Here, `_cx` is discarded, so no waker is registered. The executor
+parks the task and never re-queues it. The connection silently hangs. The fix is to store `cx.waker().clone()`
+and call it when data arrives — or, better, use a `tokio::sync` primitive that handles waker registration automatically.
+"""
+id = "d243e646-d080-485f-b332-b67bd9910c67"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "`tokio::spawn` both futures and `.await` each handle sequentially.",
+  "Use `std::thread::spawn` for each fetch; async is only for single-threaded code.",
+  "`.await` each future in sequence — Tokio automatically parallelizes sequential awaits."
+]
+prompt.prompt = """
+The Meridian control plane needs to fetch the latest TLE update from two independent
+ground stations before computing a conjunction window. Which approach correctly fetches
+both concurrently without spawning new OS threads?
+"""
+answer.answer = "`tokio::join!(fetch_tle(station_a), fetch_tle(station_b))` — both futures are polled concurrently within the same task."
+context = """
+`tokio::join!` polls multiple futures interleaved within a single task. While one future is pending (waiting on I/O),
+the executor drives the other forward. Total latency approaches the max of the two individual latencies rather than
+the sum. `tokio::spawn` would also achieve concurrency but creates independent tasks that may run on separate
+threads — appropriate for CPU-bound or fully independent work, but heavier than `join!` for simple concurrent I/O.
+"""
+id = "8a05906c-d345-4711-81d5-5ce55ea01003"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "42"
+prompt.program = """
+use std::future::Future;
+use std::pin::Pin;
+use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+
+struct ImmediateFuture;
+
+impl Future for ImmediateFuture {
+    type Output = u32;
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        Poll::Ready(42)
+    }
+}
+
+fn noop_waker() -> Waker {
+    fn noop(_: *const ()) {}
+    fn clone(p: *const ()) -> RawWaker { RawWaker::new(p, &VTABLE) }
+    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
+    unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+}
+
+fn main() {
+    let mut future = ImmediateFuture;
+    let waker = noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut future).poll(&mut cx) {
+        Poll::Ready(val) => println!("{val}"),
+        Poll::Pending => println!("pending"),
+    }
+}
+"""
+context = """
+`ImmediateFuture::poll` returns `Poll::Ready(42)` on the very first poll. The noop waker is sufficient because
+the future never returns `Pending` — it never needs to be re-scheduled. `println!("{val}")` prints `42`.
+This is exactly what an executor does under the hood: construct a `Context`, call `poll`, and match on the result.
+"""
+id = "119490e3-b860-4d99-9dd5-7ab9b5b1fe05"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "The function is not marked `#[inline]`, causing excessive function call overhead.",
+  "Using `DefaultHasher` in async context causes undefined behavior due to interior mutability.",
+  "The function allocates a new hasher on every call, causing allocator pressure."
+]
+prompt.prompt = """
+An engineer adds the following function to the Meridian telemetry pipeline to hash
+incoming frames for deduplication. After deployment, other tasks on the same executor
+thread become noticeably slower. What is the most likely cause?
+
+```rust
+async fn hash_frame(data: &[u8]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for &byte in data {
+        std::hash::Hash::hash(&byte, &mut hasher);
+    }
+    std::hash::Hasher::finish(&hasher)
+}
+```
+"""
+answer.answer = "The function performs significant CPU work with no `await` point, monopolizing the executor thread and starving other tasks."
+context = """
+Async tasks yield voluntarily at `await` points. A function with no `await` runs synchronously from start to finish.
+For O(n) CPU work on large inputs — like hashing a 64KB frame — it can hold the executor thread for milliseconds,
+preventing other tasks (such as accepting new connections) from being polled. The fix is
+`tokio::task::spawn_blocking(|| hash_frame_sync(data)).await`, which moves the CPU work onto a dedicated blocking thread pool.
+"""
+id = "8e4967ac-eef1-4fbd-8ee0-352ce19ca067"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Store `cx` directly as a field on the future struct for use in the callback.",
+  "Call `Poll::Pending` only once; subsequent polls should return `Poll::Ready` unconditionally.",
+  "Register the waker by calling `cx.waker().wake_by_ref()` immediately before returning `Poll::Pending`."
+]
+prompt.prompt = """
+A Meridian engineer is implementing a custom future that wraps a C library callback.
+The library calls the provided function pointer when data is available. Which of the
+following correctly satisfies the waker contract?
+"""
+answer.answer = "Clone `cx.waker()` into an `Arc<Mutex<Option<Waker>>>`, and have the C callback call `waker.wake()` when data arrives."
+context = """
+`Context<'_>` cannot be stored across poll calls — it is a borrow valid only for the duration of that `poll` invocation.
+The `Waker` it contains can be cloned and stored. The C callback (running on an arbitrary thread) calls `waker.wake()`,
+which re-queues the task. The `Arc<Mutex<Option<Waker>>>` pattern ensures both the future and the callback can safely
+access the waker across threads.
+
+Calling `wake_by_ref()` immediately before returning `Pending` (the distractor) would re-queue the task immediately,
+causing a busy-polling loop — the task would be polled, return Pending again, re-queue itself, and repeat indefinitely.
+"""
+id = "f43bf5ca-2294-411c-a933-b064a720ed09"

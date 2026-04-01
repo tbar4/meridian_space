@@ -1,0 +1,111 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Async tasks are preemptively scheduled by the kernel; OS threads yield cooperatively.",
+  "OS threads cannot share data between them; async tasks can via `await`.",
+  "Async tasks each have a dedicated OS thread; `tokio::spawn` creates a new thread per task."
+]
+prompt.prompt = """
+What is the fundamental scheduling difference between OS threads and async tasks
+in Tokio, and why does it determine whether blocking work belongs on each?
+"""
+answer.answer = "OS threads are preemptively scheduled by the kernel and can block safely. Async tasks are cooperatively scheduled and must yield at `await` points — blocking an async worker thread starves all other tasks on it."
+context = """
+The kernel controls OS thread scheduling — it can preempt a running thread and give CPU time to another.
+Async tasks control their own scheduling by voluntarily yielding at `await`. This means a blocking call
+(synchronous I/O, CPU loop, `std::thread::sleep`) on an async worker thread parks that thread and prevents
+all other tasks scheduled on it from making progress. The kernel cannot rescue them. `spawn_blocking` is
+the bridge: it routes blocking work to a separate thread pool, preserving async worker threads for I/O tasks.
+"""
+id = "f2a13842-c425-40a6-a813-d791a14b90f9"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Wrap the library call in an `async fn` — Rust will automatically make it non-blocking.",
+  "Use `tokio::spawn` with `async move` to run it as an async task.",
+  "Call it directly in the async handler — Rust's borrow checker prevents data races."
+]
+prompt.prompt = """
+The Meridian control plane needs to call a synchronous vendor library for TLE validation.
+The library takes 5–15ms per call and has no async version. The call originates inside
+an async request handler. What is the correct approach?
+"""
+answer.answer = "Wrap the call in `tokio::task::spawn_blocking(move || vendor_call(...)).await`, which routes it to the blocking thread pool."
+context = """
+A 5–15ms synchronous call on an async worker thread blocks that thread for up to 15ms,
+during which no other task can run on it. With 48 concurrent uplinks, this quickly becomes
+a throughput problem. `spawn_blocking` routes the closure to a dedicated blocking thread pool
+that does not interfere with async workers. The `move` keyword satisfies the `'static` bound
+required by `spawn_blocking`.
+"""
+id = "d7256a64-3af8-485a-8878-b65f39f087ed"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = false
+answer.lineNumber = 6
+prompt.program = """
+use std::thread;
+
+fn main() {
+    let data = vec![1u32, 2, 3];
+    let handle = thread::spawn(|| {
+        println!("{}", data.len());
+    });
+    handle.join().unwrap();
+}
+"""
+context = """
+This does not compile. `thread::spawn` requires the closure to be `'static`, but the closure
+borrows `data` from the enclosing stack frame. The compiler rejects this because the spawned
+thread could outlive `main` (if the handle were dropped without joining), leaving a dangling
+reference. The fix is either `move || println!(...)` (transfers ownership) or `thread::scope`
+(scoped thread that can borrow). Since `Vec<u32>` is `Send`, the `move` version compiles fine.
+"""
+id = "5d5fc39f-32db-4e8b-86be-c271ad907ad3"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "`Rc<TelemetryBuffer>` — it is faster than `Arc` due to no atomic operations.",
+  "`&TelemetryBuffer` with a `'static` lifetime annotation.",
+  "`Box<TelemetryBuffer>` — heap allocation makes it thread-safe automatically."
+]
+prompt.prompt = """
+A Meridian engineer needs to share a `TelemetryBuffer` (which implements `Send`) between
+the main thread and a spawned background writer thread. Both need to keep the buffer alive
+for different durations. Which wrapper type is correct?
+"""
+answer.answer = "`Arc<TelemetryBuffer>` — it provides shared ownership with atomic reference counting, satisfying the `Send + 'static` bound on `thread::spawn`."
+context = """
+`thread::spawn` requires `Send + 'static`. `Arc<T>` provides `'static` shared ownership: cloning
+an `Arc` is cheap (one atomic increment), and both threads hold an independent `Arc` pointing to
+the same allocation. When both drop, the buffer deallocates. `Rc<T>` uses non-atomic reference
+counting and does not implement `Send`, so the compiler will reject it. A raw `&T` reference
+cannot be `'static` unless the data is in a `static`. `Box<T>` transfers ownership and cannot
+be shared.
+"""
+id = "cc1d6de4-ff52-4135-94a5-cf6ce04802e6"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "`thread::spawn` — it can borrow slices from the calling scope without cloning.",
+  "`tokio::spawn` — it automatically parallelises CPU work across cores.",
+  "`tokio::task::spawn_blocking` — it is designed for parallel CPU work over owned data."
+]
+prompt.prompt = """
+The Meridian conjunction screening pass needs to distribute a large `Vec<OrbitalRecord>`
+across all CPU cores for parallel processing. The records do not need to be cloned or
+heap-allocated for sharing. Which concurrency mechanism is the right fit?
+"""
+answer.answer = "`thread::scope` — scoped threads can borrow slices from the enclosing frame and are guaranteed to finish before the scope exits, enabling safe parallel work over borrowed data."
+context = """
+`thread::scope` lifts the `'static` restriction on spawned threads by guaranteeing all threads
+finish before the scope exits. This allows threads to borrow slices of the `Vec` directly —
+no `Arc`, no clone. `thread::spawn` cannot borrow stack data. `tokio::spawn` is for async I/O
+tasks, not CPU-parallel work. `spawn_blocking` is for single blocking operations, not structured
+parallelism over owned data.
+"""
+id = "7619b981-12be-4fbf-962c-a7ff559f1158"

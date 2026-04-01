@@ -1,0 +1,131 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "The `MutexGuard` is dropped when `query_session` returns, releasing the lock before `register_session` is called.",
+  "Rust detects the potential deadlock at compile time and rejects the code.",
+  "`Mutex` in Rust is reentrant — a thread can call `.lock()` multiple times and it will succeed."
+]
+prompt.prompt = """
+A Meridian engineer writes the following session management code. What happens at runtime?
+
+```rust
+fn main() {
+    let table = std::sync::Mutex::new(std::collections::HashMap::<u32, String>::new());
+    let guard = table.lock().unwrap();
+    // ... check some condition on guard ...
+    // Then call a helper that also needs the table:
+    let _inner = table.lock().unwrap(); // locks again
+    println!("{}", guard.len());
+}
+```
+"""
+answer.answer = "The code deadlocks at runtime. `std::sync::Mutex` is not reentrant: when the main thread calls `.lock()` while already holding the lock from the outer scope, it blocks forever waiting for itself."
+context = """
+`std::sync::Mutex` is NOT reentrant. When the main thread calls `.lock()` a second time, it blocks
+waiting for the lock to be released. But the thread already holds the lock — it will never release
+it because it is blocked waiting for itself. The correct fix is to drop the first guard before
+acquiring the lock again, or restructure the code to not need nested locking.
+"""
+id = "b334902e-b525-4004-a391-eb4329c7df00"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use `RwLock::write()` for all accesses — it subsumes read access and is simpler.",
+  "Use `Mutex` — `RwLock` is slower than `Mutex` regardless of read/write ratio.",
+  "Store the table in a `Cell<HashMap>` — it avoids locking overhead entirely."
+]
+prompt.prompt = """
+The Meridian session table is read by 12 concurrent monitoring threads hundreds of times
+per second, but written only when sessions start or end (roughly once per minute per satellite).
+Which synchronisation primitive is most appropriate and why?
+"""
+answer.answer = "Use `RwLock` — multiple readers can hold the lock concurrently, which prevents the read-heavy monitoring queries from serializing against each other."
+context = """
+`RwLock` allows multiple concurrent readers and exclusive writers. For a read-dominated workload
+(hundreds of reads per second, one write per minute), this is a significant throughput win —
+readers do not block each other. `Mutex` would serialize all 12 monitoring queries, even though
+none of them modify the table. Note: `RwLock` is not always faster than `Mutex` on write-heavy
+workloads or on platforms with less efficient RwLock implementations, so profile when in doubt.
+"""
+id = "02c90e4b-e816-4cb2-ab00-37accb1a5c4d"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "3"
+prompt.program = """
+use std::sync::Mutex;
+
+fn main() {
+    let data = Mutex::new(vec![1u32, 2, 3]);
+    let len = {
+        let guard = data.lock().unwrap();
+        guard.len()
+    }; // guard dropped here — lock released
+    println!("{}", len);
+}
+"""
+context = """
+The guard is dropped at the end of the inner block, releasing the lock. `len` captures the
+length value (a `usize`, not a reference to the guarded data), so no borrow of the guard
+escapes the block. The program prints `3`. This is the correct pattern for minimizing lock
+scope: compute what you need while holding the lock, capture the result as an owned value,
+and let the guard drop before proceeding.
+"""
+id = "23476267-53ec-4bc2-8b53-38493e51dc1b"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use `std::sync::Mutex` — it compiles fine in async code and is faster than `tokio::sync::Mutex`.",
+  "Use `RwLock` — it allows the `.await` to proceed without blocking other readers.",
+  "Wrap the async call in `spawn_blocking` — this makes it safe to hold any `MutexGuard` across it."
+]
+prompt.prompt = """
+A Meridian async session handler needs to hold a lock, perform an async database write,
+and then release the lock. The lock must be held across the `.await` to ensure the database
+write is atomic with respect to other sessions. Which primitive is correct?
+
+```rust,edition2021
+async fn update_session(state: /* ??? */) {
+    let mut guard = state.lock().await; // or .lock().unwrap()?
+    guard.status = "writing";
+    write_to_db(&guard).await; // must hold lock across this
+    guard.status = "idle";
+}
+```
+"""
+answer.answer = "Use `tokio::sync::Mutex` — it yields to the executor while waiting for the lock instead of blocking the OS thread, and its guard can be held across `.await` points."
+context = """
+`std::sync::Mutex::lock()` blocks the OS thread while waiting. Holding a `std::sync::MutexGuard`
+across an `.await` is not a compile error but is a correctness problem: if the `.await` suspends,
+the OS thread is blocked for the duration of the wait, preventing other tasks from running on it.
+`tokio::sync::Mutex::lock().await` yields to the executor while waiting, and its `MutexGuard`
+can be held across `.await` points safely. The guard itself is `Send`, which is required
+for tasks that may move between worker threads.
+"""
+id = "41e56985-c905-4254-aa93-f930bb06325f"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "The `Condvar::wait` call polls the queue in a tight loop, consuming CPU until data arrives.",
+  "`Condvar::wait` releases the mutex but keeps the thread running, checking for notification every millisecond.",
+  "The `Condvar` automatically acquires a new lock after waking — the existing `MutexGuard` is invalid after `wait`."
+]
+prompt.prompt = """
+In the Meridian command queue's consumer loop, `Condvar::wait` is used to block when the queue
+is empty. What does `Condvar::wait` do to the mutex and the thread while waiting?
+"""
+answer.answer = "`Condvar::wait` atomically releases the mutex and blocks the thread (no CPU consumed), then reacquires the mutex before returning — the same `MutexGuard` is valid after the call."
+context = """
+The key property of `Condvar::wait`: it releases the mutex and blocks the thread atomically.
+This means there is no window where the thread is unscheduled but still holds the mutex,
+and no window where the producer could push data and notify before the consumer has started
+waiting. The consumer can safely re-check the condition after `wait` returns because the
+mutex is reacquired before `wait` returns — the returned guard is valid. Always re-check
+the condition in a loop rather than assuming `wait` returned because the condition is true
+(spurious wakeups are possible on some platforms).
+"""
+id = "8178a617-af95-4625-90a4-b411ee18cebb"

@@ -1,0 +1,129 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "`anyhow::Result` does not propagate errors correctly when a task is aborted.",
+  "`.abort()` corrupts the future's state machine, making the return value unreliable.",
+  "The task should use `std::panic::catch_unwind` to intercept the cancellation signal."
+]
+prompt.prompt = """
+A Meridian engineer writes the following session handler. During a rolling deploy,
+sessions are cancelled via `.abort()`. After the deploy, the engineering team discovers
+that session state was not persisted for any sessions that were in-flight during the
+deploy. What went wrong?
+
+```rust
+async fn session_handler(id: u64) -> anyhow::Result<()> {
+    process_incoming_frames().await?;
+    // flush and persist session state
+    persist_session_state(id).await?;
+    Ok(())
+}
+```
+"""
+answer.answer = "Cancellation drops the future at its next `.await` point — if `process_incoming_frames` is pending when `.abort()` fires, `persist_session_state` never runs."
+context = """
+`.abort()` causes cooperative cancellation: the future is dropped at its next `.await`. Any code after that await
+does not execute. `persist_session_state` is after the first await, so it is not guaranteed to run. The fix is to
+move mandatory cleanup into a `Drop` impl (synchronous cleanup) or use `CancellationToken` to receive the shutdown
+signal, run async cleanup, and then exit the task intentionally.
+"""
+id = "7d0bf7b3-b602-4ce5-8be8-c4bedb890ff5"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "The task stops immediately at the point `.abort()` is called, regardless of where it is in execution.",
+  "`.await` on an aborted handle returns `Ok(())` — the task is considered successfully completed.",
+  "Calling `.abort()` on a task that is currently sleeping has no effect — only running tasks can be aborted."
+]
+prompt.prompt = """
+A Meridian engineer aborts a session task that is currently sleeping on a long timeout,
+then awaits the handle. What does `handle.await` return, and does "task done" print?
+
+```rust
+let handle = tokio::spawn(async {
+    tokio::time::sleep(Duration::from_secs(100)).await;
+    println!("task done");
+});
+
+handle.abort();
+let result = handle.await;
+```
+"""
+answer.answer = "`.await` on the handle returns `Err(JoinError)` where `e.is_cancelled()` is `true`. The task is dropped at its next `.await` point, so \"task done\" never prints."
+context = """
+`.abort()` schedules cooperative cancellation — the task is dropped at its next `.await` point. The sleep's
+`.await` is the cancellation point, so the future is dropped there and "task done" never executes.
+`handle.await` returns `Err(JoinError)` with `is_cancelled() == true`. This is distinct from a panic, which
+returns `Err(JoinError)` with `is_panic() == true`. Always match on both cases in production shutdown code.
+"""
+id = "3a95d5d5-b069-4b8d-ab4d-8b91aa2f631e"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "The lock is leaked — `tokio::sync::MutexGuard` does not implement `Drop`.",
+  "The runtime detects the orphaned lock and force-releases it to prevent deadlock.",
+  "The lock is held indefinitely until the next task that tries to acquire it times out as well."
+]
+prompt.prompt = """
+The Meridian control plane races each satellite pass session against a pass-duration
+timeout using `tokio::time::timeout`. When a timeout fires, the session was holding
+a `tokio::sync::Mutex` lock on a shared frame buffer.
+
+What happens to the lock when the session future is cancelled by the timeout?
+"""
+answer.answer = "The `MutexGuard` is dropped as part of the cancelled future's cleanup — Rust's RAII ensures the lock is released when the guard is dropped."
+context = """
+Cancellation drops the future's state machine, which drops all values it holds — including `MutexGuard`.
+`MutexGuard::drop` releases the lock. This is why RAII-based resource management composes well with async
+cancellation: as long as your types implement `Drop` correctly, cancellation does not leak resources. The risk
+is in code that relies on explicit cleanup *after* an `.await` — that code may not run.
+"""
+id = "a94e345c-3e2c-4a24-bcee-cdba7c8aed38"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Implement `Drop` for the session struct and call `channel.send(SessionEnded).await` inside `drop`.",
+  "Use `std::panic::catch_unwind` around the session future to intercept the cancellation.",
+  "Call `handle.abort()` only after manually sending `SessionEnded` in the task loop."
+]
+prompt.prompt = """
+An engineer needs to implement a Meridian session that must send a `SessionEnded`
+message over a `tokio::sync::mpsc` channel when it is cancelled — this message
+is required for downstream accounting. Which approach correctly handles this?
+"""
+answer.answer = "Use a `CancellationToken` — select between session work and the token, and when the token fires, send `SessionEnded` before returning."
+context = """
+`Drop` is synchronous — you cannot `.await` inside it, so you cannot send over an async channel from `Drop`.
+`catch_unwind` does not intercept task cancellation — cancellation is not a panic. The correct pattern is
+`tokio_util::sync::CancellationToken`: the task selects between its work and the token. When shutdown fires,
+it cancels the token, the `select!` arm activates, and the task runs async cleanup (including sending `SessionEnded`)
+before returning normally.
+"""
+id = "4c2405e2-8cfc-4b5f-abde-9f66e3482c24"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Increase `max_blocking_threads` so the TCP flush can run on a blocking thread.",
+  "Add `handle.abort()` before awaiting each task handle during shutdown.",
+  "Remove the wait and let the OS clean up resources when the process exits."
+]
+prompt.prompt = """
+The Meridian control plane graceful shutdown procedure currently waits indefinitely
+for all active session tasks to complete before exiting. During a recent incident,
+one session task hung on a TCP flush that never resolved, preventing the process
+from exiting and causing the orchestrator to send SIGKILL after 30 seconds.
+
+Which change most directly fixes this?
+"""
+answer.answer = "Wrap the task-drain loop in `tokio::time::timeout` with a reasonable deadline — after the deadline, abort remaining tasks and exit."
+context = """
+A deadline on the drain phase is essential for robust graceful shutdown. After broadcasting the shutdown signal,
+give tasks a bounded window (e.g., 10 seconds) to finish. Any task still running after the deadline is aborted —
+its RAII cleanup still runs. Calling `.abort()` before `.await` (the distractor) would cancel all tasks immediately,
+bypassing any cleanup they might have done given time. Relying on OS cleanup skips application-level state flushing entirely.
+"""
+id = "491ac76b-ef0b-4e21-9dd3-367403adacb6"

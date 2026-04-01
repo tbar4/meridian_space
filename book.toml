@@ -2,7 +2,11 @@
 title = "Meridian Space"
 authors = ["Trevor Barnes"]
 language = "en"
+edition = "2024"
 
 # mdbook-quiz incomptaible with mdbook >= 0.5.0
 [preprocessor.quiz]
 #[preprocessor.callouts]
+
+[output.html]
+playground.editable = true

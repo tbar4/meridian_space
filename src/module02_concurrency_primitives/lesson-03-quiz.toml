@@ -1,0 +1,134 @@
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "100\n123"
+prompt.program = """
+use std::sync::atomic::{AtomicI32, Ordering::Relaxed};
+
+fn main() {
+    let a = AtomicI32::new(100);
+    let b = a.fetch_add(23, Relaxed);
+    println!("{}", b);
+    println!("{}", a.load(Relaxed));
+}
+"""
+context = """
+`fetch_add` returns the value *before* the addition. `b` receives the original value (100).
+After the operation, `a` holds 123. The program prints 100 then 123. This is the defining
+behaviour of fetch-and-modify operations: the return value is always the previous value,
+not the result of the operation.
+"""
+id = "7574b565-f93a-4ebd-9fa1-49b435fd16ae"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "It is not possible — atomics cannot express cross-variable ordering guarantees.",
+  "Use `Relaxed` on both the data store and the flag store — `Relaxed` is sufficient for single-producer patterns.",
+  "Use `SeqCst` on all operations — this is the safest choice and works for all cases."
+]
+prompt.prompt = """
+A Meridian telemetry pipeline stores a parsed frame into an `AtomicU64`, then sets a boolean
+flag to signal a consumer thread that the frame is ready. What memory ordering is required to
+guarantee the consumer sees the frame data after it reads the flag as `true`?
+"""
+answer.answer = "Store the frame data with `Relaxed`, then store the ready flag with `Release`. On the reading side, load the flag with `Acquire` and the data with `Relaxed`. The Acquire/Release pair establishes happens-before."
+context = """
+This is the canonical Acquire/Release pattern. The producer does: (1) store frame data with
+Relaxed, (2) store flag with Release. The Release-store acts as a publication barrier —
+everything before it is visible to any thread that observes this store with an Acquire-load.
+The consumer does: (1) load flag with Acquire, (2) load frame data with Relaxed. Once the
+Acquire-load sees `true`, the happens-before relationship guarantees the frame data is visible.
+Using Relaxed for both allows reordering — the consumer could see the flag as `true` but still
+read stale data. SeqCst works but is unnecessarily strong and has higher cost on ARM.
+"""
+id = "c793130b-8ea9-44b4-9b4e-2b6ce980c7f9"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "`Relaxed` — it provides a total modification order on each atomic variable.",
+  "`SeqCst` — it guarantees operations from all threads are visible in a consistent order.",
+  "`AcqRel` — it provides both acquire and release semantics on the same operation."
+]
+prompt.prompt = """
+The Meridian frame counter is incremented by 48 concurrent uplink tasks and sampled
+once per second by a monitoring dashboard. The dashboard does not need to observe
+frame counts in any particular relationship to other atomic variables — it only needs
+to see a recent approximate value. Which memory ordering is appropriate for both the
+`fetch_add` on the writer side and the `load` on the dashboard side?
+"""
+answer.answer = "`Relaxed` — statistics counters only need eventual consistency on their own value. Cross-variable ordering is not needed, and the performance cost of stronger orderings is unnecessary."
+context = """
+`Relaxed` provides two guarantees: the operation is atomic (no torn reads or non-atomic
+increments), and all threads observe the same total modification order for that specific
+variable. For a statistics counter where only the current value matters and no
+cross-variable ordering is required, this is sufficient and cheapest. `SeqCst` would also
+be correct but adds global ordering overhead. `AcqRel` is for read-modify-write operations
+that participate in a happens-before relationship, which is not needed here.
+"""
+id = "db67bc33-dc7b-44eb-9d4b-9a3d7eee27c6"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "`compare_exchange` succeeds — the final value is still 5, so the CAS will swap it to 6.",
+  "The code panics — `compare_exchange` does not allow retrying on failure.",
+  "The loop runs exactly twice — once for each thread's modification."
+]
+prompt.prompt = """
+Two threads run concurrently. Thread A runs `increment_capped` below. Thread B changes
+the value from 0 to 5 between Thread A's `load` and `compare_exchange`. What does
+Thread A's `compare_exchange` loop do?
+
+```rust,edition2021
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+
+fn increment_capped(a: &AtomicU32, limit: u32) {
+    let mut current = a.load(Relaxed);   // Thread A loads 0
+    // Thread B stores 5 here
+    loop {
+        if current >= limit { return; }
+        match a.compare_exchange(current, current + 1, Relaxed, Relaxed) {
+            Ok(_) => return,
+            Err(v) => current = v,
+        }
+    }
+}
+```
+"""
+answer.answer = "`compare_exchange` fails with `Err(5)` on the first attempt (another thread changed 0 to 5), then succeeds on the retry with `current = 5`, storing 6."
+context = """
+Thread A loads 0 from `a`. Before the CAS executes, Thread B stores 5. Thread A's first
+`compare_exchange(0, 1, ...)` fails because the actual value is now 5 (not the expected 0).
+The `Err(5)` updates `current` to 5. On the next iteration, `compare_exchange(5, 6, ...)`
+succeeds (assuming no further concurrent modification) and the function returns. This is the
+CAS retry loop: failure doesn't mean the operation failed — it means a concurrent modification
+occurred and the operation should be retried with the updated value.
+"""
+id = "349a391f-5c78-4daa-bc21-56237d62ca1b"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "`SeqCst` on all operations — it guarantees a total global order so no reordering is possible.",
+  "`AcqRel` on the flag — it combines acquire and release in a single operation, which is sufficient.",
+  "`Relaxed` on both — atomic operations are indivisible, which prevents the ordering issue."
+]
+prompt.prompt = """
+The Meridian session setup code initialises several fields of a session struct, then
+atomically sets a `session_ready` flag that other threads poll. What memory ordering
+is required to guarantee that threads reading `session_ready = true` also see all the
+initialised session fields?
+"""
+answer.answer = "`Release` on the flag store (producer) and `Acquire` on the flag load (consumer). This establishes a happens-before relationship: the consumer sees all stores from before the Release once it observes the flag via Acquire."
+context = """
+This is precisely what Acquire/Release is designed for. Release on the store ensures all
+preceding stores (the session field initialisations) cannot be reordered after the flag
+store. Acquire on the load ensures all following loads (reading the session fields) cannot
+be reordered before the flag load. SeqCst would work but has unnecessary overhead.
+AcqRel is for a single read-modify-write operation, not a store-load pair. Relaxed provides
+no cross-variable ordering — a thread could read `session_ready = true` but still see
+uninitialised session fields.
+"""
+id = "b32db4e9-3112-40ea-8c47-052a7029adef"

@@ -1,0 +1,125 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use two separate `mpsc` channels and call `recv()` on each alternately in a loop.",
+  "Use `tokio::select!` without `biased` — it randomly selects a ready branch each iteration.",
+  "Use `tokio::join!` on both channels — it processes both simultaneously."
+]
+prompt.prompt = """
+The Meridian aggregator receives frames from two channels: one for emergency commands
+(SAFE_MODE, ABORT_PASS) and one for routine telemetry. Emergency frames must always be
+processed before routine ones when both are available. Which fan-in approach is correct?
+"""
+answer.answer = "Use `tokio::select!` with `biased` — it evaluates the high-priority branch first each iteration, ensuring SAFE_MODE frames are not delayed behind queued housekeeping frames."
+context = """
+`select! { biased; ... }` evaluates branches in order, not randomly. The high-priority
+channel branch is evaluated first on every iteration — if it has a message, it is processed
+regardless of what is in the low-priority channel. Without `biased`, `select!` randomly
+picks among ready branches, so a low-priority frame could be processed before a
+high-priority one if both are ready simultaneously. `recv()` alternation would not prioritize
+— it strictly alternates. `join!` waits for both to complete, not the first ready.
+"""
+id = "37efed0f-e05e-4024-b30c-fb05ddbe1ba3"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use a separate `mpsc::Sender` per source — the consumer receives from one channel per satellite.",
+  "Use an `Arc<Mutex<Vec<u8>>>` per source — the consumer polls all 48 shared buffers.",
+  "Use `broadcast` — all 48 satellites share one channel and the consumer subscribes to it."
+]
+prompt.prompt = """
+The Meridian aggregator needs to receive telemetry frames from all 48 concurrent uplink
+sessions. Sessions produce at different rates. The aggregator should process frames in
+arrival order regardless of which satellite they came from. What is the correct approach?
+"""
+answer.answer = "Clone the `mpsc::Sender` 48 times and give one to each session task. The consumer reads from the single `Receiver`, receiving frames from all sessions interleaved."
+context = """
+`mpsc::Sender` is `Clone`. Every clone is an independent producer on the same bounded
+channel. The consumer sees all 48 streams merged in arrival order through the single
+`Receiver`. This is the idiomatic multi-producer fan-in pattern. A separate channel per
+source would require the consumer to select or poll 48 channels — much more complex.
+`broadcast` distributes one message to many consumers — it is fan-out, not fan-in.
+"""
+id = "bf207075-4e84-4231-a24c-75c9a21fa516"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "3"
+prompt.program = """
+use std::sync::mpsc;
+
+fn main() {
+    let (tx, rx) = mpsc::channel::<i32>();
+    let tx2 = tx.clone();
+    let tx3 = tx.clone();
+
+    tx.send(1).unwrap();
+    tx2.send(2).unwrap();
+    tx3.send(3).unwrap();
+
+    drop(tx);
+    drop(tx2);
+    drop(tx3);
+
+    let mut count = 0;
+    while let Ok(_) = rx.recv() {
+        count += 1;
+    }
+    println!("{count}");
+}
+"""
+context = """
+Three senders each send one message. All three senders are then dropped, closing the channel.
+The `while let Ok(_) = rx.recv()` loop receives all three messages, then `recv()` returns
+`Err` (channel closed) and the loop exits. `count` is 3. This demonstrates the shared-sender
+fan-in: multiple `Sender` clones funnel into one `Receiver`.
+"""
+id = "1b0767b8-bfe5-4fce-bdee-783a9c1ac610"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Store the source satellite ID in a `thread_local` — each session task has its own ID.",
+  "Use the message arrival order — the consumer can infer the source from sequence numbers.",
+  "Maintain a `HashMap<usize, u32>` mapping channel slot to satellite ID in the consumer."
+]
+prompt.prompt = """
+After merging 48 satellite feeds into a single `mpsc` channel, the aggregator consumer
+needs to know which satellite each frame came from to update per-satellite statistics.
+What is the correct approach?
+"""
+answer.answer = "Wrap payloads in a `TaggedFrame { source_id: u32, payload: Vec<u8> }` struct sent through the shared channel. The consumer pattern-matches on the source without any external state."
+context = """
+Tag the message at the producer side. The producer owns its satellite ID at spawn time;
+wrapping the payload in a struct that includes the ID is zero-cost at the channel level —
+the struct is moved through the channel just like a bare `Vec<u8>`. The consumer receives
+a fully self-describing value and never needs to consult external state to determine provenance.
+`thread_local` would require the consumer to read state from 48 different thread-local slots.
+Sequence-number inference breaks when sequences from multiple satellites interleave.
+"""
+id = "a479d19d-389c-4474-8ae2-ed22fedae5f2"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Add another `Sender` clone to the `select!` loop for each new satellite.",
+  "Restart the aggregator task with an updated list of receivers each time a new satellite connects.",
+  "Use a `broadcast` channel that all 48 satellites subscribe to as receivers."
+]
+prompt.prompt = """
+During a satellite constellation expansion, new uplink sessions come online while the
+aggregator is running. The fan-in needs to accept new sources at runtime without
+restarting. Which pattern handles dynamic source registration?
+"""
+answer.answer = "Use a router actor: send a control message to register the new feed's `Receiver`. The router spawns a forwarding task that reads from it and merges into the internal channel."
+context = """
+The router actor pattern accepts control messages (`AddFeed`, `RemoveFeed`) to register
+and unregister sources at runtime. Each new source gets a dedicated forwarding task that
+reads from its `Receiver` and sends tagged frames to the router's internal channel. The
+router's `select!` loop does not need to change when sources are added or removed.
+Extending a `select!` loop statically requires knowing sources at compile time. Restarting
+the aggregator loses buffered frames. `broadcast` is fan-out, not fan-in.
+"""
+id = "2af28a55-3983-4fe6-a859-82aa55a4cd24"
