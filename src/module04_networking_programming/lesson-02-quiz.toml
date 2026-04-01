@@ -1,0 +1,116 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "The read returns an error — UDP rejects datagrams larger than the buffer.",
+  "The read blocks until enough buffer space is available to receive the full datagram.",
+  "The datagram is split across two `recv_from` calls — the second call receives the remainder."
+]
+prompt.prompt = """
+A Meridian radar sensor sends a 2000-byte detection datagram. The receiver calls
+`socket.recv_from(&mut buf)` where `buf` is 1024 bytes. What happens?
+"""
+answer.answer = "The bytes beyond the buffer size are silently discarded. `recv_from` returns the number of bytes that fit in the buffer, not the full datagram size."
+context = """
+UDP datagrams are not streams — there is no partial-read concept. When the datagram
+exceeds the receive buffer, the excess bytes are silently dropped by the OS. The call
+returns `Ok((1024, addr))` — 1024 bytes received. The application has no way to retrieve
+the remaining 976 bytes. This is why receive buffers must be sized to the maximum expected
+datagram. A 2000-byte datagram would itself risk IP fragmentation on a standard 1500-byte
+MTU network, but even if received intact, only the first `buf.len()` bytes are kept.
+"""
+id = "14b54d6f-45e5-49b1-bc29-20648c3d55d6"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "UDP provides ordering within a session — datagrams from the same source arrive in send order.",
+  "Calling `socket.connect()` enables TCP-style retransmission for the connected peer.",
+  "UDP delivery is guaranteed on local networks where packet loss is negligible."
+]
+prompt.prompt = """
+The Meridian SDA optical sensor sends position updates every 100ms via UDP.
+Which statement about delivery guarantees is correct?
+"""
+answer.answer = "UDP provides no ordering, reliability, or retransmission. Each datagram may arrive out of order, be duplicated, or be lost entirely — the application must handle all of these."
+context = """
+UDP is a connectionless datagram protocol with no delivery guarantees of any kind.
+Datagrams may arrive out of order (earlier datagrams may arrive after later ones),
+may be duplicated (routers can duplicate packets in rare cases), and may be lost
+(network congestion, transient errors). `socket.connect()` sets a default remote address
+and applies a receive filter — it does not establish a TCP-style connection or add any
+reliability. For sensor position data where only the latest value matters, loss is
+acceptable — the next update arrives in 100ms. For data that must not be lost, use TCP
+or implement application-layer acknowledgment.
+"""
+id = "6deb59c5-4195-4fa4-8485-b80fc65cf281"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "bound"
+prompt.program = """
+use std::net::UdpSocket;
+
+fn main() {
+    let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let addr = socket.local_addr().unwrap();
+    println!("bound");
+    // addr contains the OS-assigned port
+    let _ = addr;
+}
+"""
+context = """
+Binding to port 0 tells the OS to assign an available ephemeral port. `local_addr()`
+returns the actual address including the OS-assigned port. The program prints "bound"
+and exits cleanly. This is the standard pattern for outbound UDP sockets where the
+local port does not matter — the remote end learns the source port from the datagram
+header when the first packet arrives.
+"""
+id = "db25b710-8296-4bf8-82d0-61ffa9286535"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use `send().await` — it will block the receive loop until the pipeline has capacity, ensuring no data is lost.",
+  "Use a separate OS thread for receiving — UDP sockets can be shared between threads and an OS thread won't block the async executor.",
+  "Increase the channel capacity to a very large value so `send().await` never blocks."
+]
+prompt.prompt = """
+The Meridian radar receiver is forwarding detections to a downstream conjunction
+analysis pipeline via `mpsc::Sender`. During a burst, the pipeline falls behind.
+What is the correct forwarding strategy?
+"""
+answer.answer = "Use `try_send` — if the pipeline is full, drop the datagram and continue receiving. Blocking the receive loop causes the OS socket buffer to overflow, losing more data than a single dropped datagram."
+context = """
+`send().await` would park the receive task while the pipeline drains, during which time
+incoming UDP datagrams pile up in the OS socket buffer. If the burst continues, the OS
+buffer overflows and datagrams are dropped silently at the OS level — worse than controlled
+application-level dropping. `try_send` returns immediately if the channel is full, letting
+the receive loop continue draining the socket buffer. One dropped detection is better than
+losing 50 because the receive loop was parked. For radar data where the next sweep
+arrives in 250ms, recency matters more than completeness.
+"""
+id = "d7f04558-e521-4125-a162-c2f1961c0245"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use `TcpStream::into_split()` — this works for both TCP and UDP sockets.",
+  "Use `UdpSocket::into_split()` — it returns `OwnedRecvHalf` and `OwnedSendHalf` like `TcpStream`.",
+  "It is not possible to use one UDP socket from two tasks — use two separate sockets."
+]
+prompt.prompt = """
+The Meridian SDA network receiver needs to receive radar detections on one task and
+send periodic poll requests to sensors from a separate task — both using the same
+bound UDP socket. What is the idiomatic approach?
+"""
+answer.answer = "Wrap the socket in `Arc<UdpSocket>` — `send_to` and `recv_from` take `&self`, so multiple tasks can share the same socket via `Arc::clone` without any formal split."
+context = """
+Unlike `TcpStream`, `UdpSocket::send_to` and `recv_from` take `&self` (shared reference),
+not `&mut self`. This means multiple tasks can legally hold `Arc<UdpSocket>` and call
+`send_to` or `recv_from` concurrently. `Arc::clone` is the correct pattern — cheap (one
+atomic increment) and type-safe. `TcpStream::into_split()` is TCP-specific. `UdpSocket`
+does have `into_split()` in recent Tokio versions, but `Arc` sharing is simpler and equally
+correct for UDP where both send and receive are `&self` operations.
+"""
+id = "f02d1b98-1a79-48da-b5d4-4650d0e9090e"

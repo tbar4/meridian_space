@@ -1,0 +1,123 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "The listener has been closed — the server should restart.",
+  "`accept()` will never return `Ok` again after returning an error.",
+  "The error should be propagated immediately with `?` to terminate the accept loop."
+]
+prompt.prompt = """
+The Meridian ground station server's accept loop encounters an `Err` from `listener.accept()`.
+What is the correct response for most errors?
+"""
+answer.answer = "`accept()` can return transient OS errors (EAGAIN, ECONNABORTED) that do not indicate a broken listener. Log the error and `continue` — the loop should retry."
+context = """
+Not all errors from `accept()` mean the listener is broken. `ECONNABORTED` means a connection
+was aborted before it was accepted — harmless. `EAGAIN` is a transient resource error.
+These should be logged and retried. Only truly unrecoverable errors (the listener fd was
+closed, out of file descriptors without recovery) warrant terminating the loop. Immediately
+propagating all errors with `?` would cause the server to exit on routine transient errors,
+which is incorrect for a production service.
+"""
+id = "e8495323-d421-4361-b410-986d7f959eaf"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Return from the read loop immediately with `Ok(())` — the connection is healthy.",
+  "Call `read()` again immediately — `Ok(0)` is a transient condition that resolves itself.",
+  "Log a warning and retry — the remote may resume sending data."
+]
+prompt.prompt = """
+A Meridian connection handler's `stream.read(&mut buf).await` returns `Ok(0)`.
+What does this indicate and what should the handler do?
+"""
+answer.answer = "Exit the read loop. `Ok(0)` means the remote has closed its write half — all subsequent `read()` calls will also return `Ok(0)`, creating a spin loop if not handled."
+context = """
+`Ok(0)` from `AsyncRead::read` is the EOF signal — the remote has closed the write half
+of the TCP connection. There is no more data to read. Calling `read()` again will return
+`Ok(0)` again immediately, forever — not a retry-able condition, not a transient error.
+Any loop that calls `read()` without checking for `Ok(0)` will spin at 100% CPU consuming
+zero useful work. Exit the loop and close the connection.
+"""
+id = "f3635b77-ca6c-45dd-9b37-bf5a8bc76805"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "compiled"
+prompt.program = """
+use std::io::{Read, Write};
+use std::net::TcpStream;
+
+fn echo(mut stream: TcpStream) {
+    let mut buf = [0u8; 512];
+    loop {
+        let n = stream.read(&mut buf).unwrap();
+        if n == 0 { break; }
+        stream.write_all(&buf[..n]).unwrap();
+    }
+}
+
+fn main() {
+    // Demonstrate: cannot borrow stream as mutable twice simultaneously
+    let stream = TcpStream::connect("127.0.0.1:7777");
+    // (connection may fail at runtime, but we're testing compile behaviour)
+    println!("compiled");
+}
+"""
+context = """
+This actually DOES compile. `std::net::TcpStream` allows calling `read` and `write` on
+the same value sequentially (not simultaneously) — the borrow of `&mut buf` and
+`&buf[..n]` do not overlap in time. The function compiles fine. The key point is that
+sequential read-then-write on the same stream is legal; simultaneous mutable borrows
+are not. The `main` function may fail at runtime if nothing is listening on port 7777,
+but it compiles. This question tests understanding that borrowing issues arise with
+*simultaneous* use, not sequential use.
+"""
+id = "7251108a-68af-4cea-baf8-ecde32dac672"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use `TcpStream::split()` (reference split) — it allows sending each half to a separate spawned task.",
+  "Use `io::copy(&mut stream, &mut stream)` — it handles the bidirectional copy internally.",
+  "Clone the `TcpStream` — each clone can be used independently for read and write."
+]
+prompt.prompt = """
+A Meridian session handler needs to spawn a separate write task for sending heartbeat
+messages while the main task continues reading incoming frames. Both halves must be
+able to move to different spawned tasks. Which split method is correct?
+"""
+answer.answer = "Use `TcpStream::into_split()` — it consumes the stream and returns owned `OwnedReadHalf` and `OwnedWriteHalf` that can each be moved into separate tasks."
+context = """
+`TcpStream::split()` returns references bound to the lifetime of the original stream — they
+cannot be moved to a different task. `TcpStream::into_split()` consumes the stream and
+returns `OwnedReadHalf` / `OwnedWriteHalf` which are `'static` and `Send`, making them
+movable into spawned tasks. `io::split(stream)` from `tokio::io` also produces owned halves
+(using `Arc<Mutex>` internally), but `into_split()` is preferred for `TcpStream` since it
+uses a simpler mechanism. `TcpStream` does not implement `Clone`.
+"""
+id = "044712a5-2d9a-41c6-8c57-04d57380ef51"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use `write()` in a loop — it will retry automatically until all bytes are written.",
+  "Use `BufWriter::write()` — buffered writers automatically flush on every write call.",
+  "There is no issue — `write()` always writes all bytes provided to it."
+]
+prompt.prompt = """
+A Meridian connection handler writes a telemetry acknowledgment to a `TcpStream`.
+The acknowledgment is 128 bytes. Which write method guarantees all 128 bytes are sent?
+"""
+answer.answer = "Use `write_all()` — it loops internally until every byte is written or an error occurs. A single `write()` may write fewer bytes than requested without returning an error."
+context = """
+`AsyncWriteExt::write()` returns the number of bytes written, which may be fewer than the
+buffer length. For example, if the socket send buffer is nearly full, a 128-byte write may
+only send 64 bytes and return `Ok(64)` — not an error. `write_all()` loops internally,
+retrying until all bytes are written or a genuine error occurs. In almost all application
+code, `write_all()` is the correct choice. `write()` is appropriate only when you
+explicitly want to handle partial writes, which is rare outside of custom protocol
+implementations.
+"""
+id = "0484a68c-41ba-40ac-96a4-20a874efe606"
