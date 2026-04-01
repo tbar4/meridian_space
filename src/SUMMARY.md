@@ -27,7 +27,15 @@
   - [HTTP Clients](./module04_networking_programming/http_clients.md)
   - [Project: Ground Station Client](./module04_networking_programming/project_gs_client.md)
 ---
-- [Data Oriented Programming]()
+- [Data Oriented Programming](./module05_data_oriented_programming/README.md)
+  - [Cache Friendly Data Layouts](./module05_data_oriented_programming/cache_friendly_data_layouts.md)
+  - [SOA vs SOS](./module05_data_oriented_programming/soa_vs_sos.md)
+  - [Arena Allocation](./module05_data_oriented_programming/arena_allocation.md)
+  - [Project: Telemetry Processor](./module05_data_oriented_programming/project_telemetry_processor.md)
 ---
-- [Performance & Profiling]()
+- [Performance & Profiling](./module06_performance_and_profiling/README.md)
+  - [Benchmarking](./module06_performance_and_profiling/benchmarking.md)
+  - [Flamegraph](./module06_performance_and_profiling/flamegraph.md)
+  - [Memory Profiling](./module06_performance_and_profiling/memory_profiling.md)
+  - [Project: Performance Audit](./module06_performance_and_profiling/project_performance_audit.md)
 ---

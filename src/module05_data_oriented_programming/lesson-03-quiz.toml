@@ -1,0 +1,132 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "A bump allocator is faster because it uses unsafe Rust, which bypasses safety checks.",
+  "A bump allocator batches multiple allocations into one `malloc` call, reducing syscall count.",
+  "A bump allocator uses SIMD instructions to allocate memory in parallel."
+]
+answer.answer = "A bump allocator replaces each allocation with a single pointer increment and replaces all deallocations with a single offset reset. There are no free lists, no locks, and no metadata updates."
+prompt.prompt = """
+Why is a bump allocator faster than the global allocator for 100,000 short-lived,
+same-lifetime frame payloads?
+"""
+context = """
+The global allocator's cost per allocation includes: finding a free block of the right size
+(free list traversal), potentially splitting a larger block, updating allocator metadata,
+and for deallocation, potentially coalescing adjacent free blocks. In a multi-threaded
+program, all of this is protected by a lock or lock-free operations with atomic overhead.
+A bump allocator does none of this. Each allocation is: check that `offset + size <= capacity`,
+then `offset += size`. Each epoch's deallocation is: `offset = 0`. The entire overhead is
+one integer add and one bounds check per allocation.
+"""
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "allocated 16 at offset 16\nallocated 8 at offset 24\nafter reset: offset=0"
+prompt.program = """
+struct Bump { buf: Vec<u8>, offset: usize }
+
+impl Bump {
+    fn new(cap: usize) -> Self { Self { buf: vec![0; cap], offset: 0 } }
+    fn alloc(&mut self, size: usize) -> usize {
+        let start = self.offset;
+        self.offset += size;
+        start
+    }
+    fn reset(&mut self) { self.offset = 0; }
+}
+
+fn main() {
+    let mut b = Bump::new(1024);
+    let a = b.alloc(16);
+    println!("allocated 16 at offset {}", b.offset);
+    let _ = b.alloc(8);
+    println!("allocated 8 at offset {}", b.offset);
+    b.reset();
+    println!("after reset: offset={}", b.offset);
+}
+"""
+context = """
+After allocating 16 bytes, offset = 16. After allocating 8 more bytes, offset = 24.
+After `reset()`, offset = 0. The output is "allocated 16 at offset 16", "allocated 8
+at offset 24", "after reset: offset=0". This traces the core bump allocator pattern:
+offset only moves forward during an epoch; `reset()` reclaims the entire slab at once.
+"""
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use a bump arena for all allocations — arenas are always faster than the global allocator.",
+  "Keep the long-lived frame in the arena and mark the other slots as reusable with a free list.",
+  "Use a bump arena and never reset it — the OS will reclaim the memory when the process exits."
+]
+answer.answer = "Copy the long-lived frame's payload to a global-allocator allocation (e.g., `Vec::from(slot)`) before resetting the arena. The rest of the batch is freed by the reset."
+prompt.prompt = """
+A Meridian frame batch processor uses a bump arena for 1,000 frames per batch.
+After processing, 999 frames are forwarded immediately, but one high-priority frame
+must be queued for delayed delivery and must outlive the current batch. How do you
+handle this with a bump allocator?
+"""
+context = """
+The bump allocator's core limitation is that all allocations from one arena share
+the same lifetime — they are all freed when the arena resets. If one object must
+outlive the arena, it cannot remain in arena memory after the reset.
+
+The correct approach: before resetting the arena, copy the long-lived frame's data
+to the global heap (e.g., `Vec::from(arena_slice)` or `Box::from(arena_slice)`).
+The copy is O(payload_size) — a small, bounded cost. The remaining 999 frames are
+freed by the reset at zero per-frame cost. This preserves the arena's efficiency
+for the common case while handling the exception correctly.
+"""
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Use a single shared arena protected by a `Mutex` — all threads share the same slab.",
+  "Use `unsafe` raw pointer arithmetic on a shared `static` buffer to avoid overhead.",
+  "Use the global allocator — arenas do not support concurrent access from multiple threads."
+]
+answer.answer = "Use a thread-local arena (`thread_local! { static ARENA: RefCell<Bump> }`) — each thread allocates from its own slab with no synchronisation overhead."
+prompt.prompt = """
+The Meridian telemetry processor uses 8 worker threads, each processing independent
+batches of frames. How should arena allocation be structured to eliminate cross-thread
+contention?
+"""
+context = """
+A shared arena protected by a `Mutex` would work correctly but reintroduces lock
+contention — exactly what we are trying to avoid. The global allocator is thread-safe
+but has overhead; a bump arena in a `Mutex` would be at least as slow.
+
+Thread-local arenas give each thread exclusive ownership of its slab. No lock, no atomic
+operation, no cache line bounce between threads. Each thread's allocation path is:
+read thread-local offset, add size, write back. This is the same as single-threaded
+bump allocation with zero concurrency overhead. `thread_local!` in Rust provides
+per-thread storage that is exclusive to the owning thread — safe without `unsafe`.
+"""
+
+[[questions]]
+type = "MultipleChoice"
+prompt.distractors = [
+  "Any short-lived allocation — arenas are always more efficient than `Vec` or `Box`.",
+  "Allocations with mixed lifetimes — the arena can track which objects are still live.",
+  "Allocations that require individual deallocation in arbitrary order."
+]
+answer.answer = "Allocations where all objects from one batch share the same lifetime — a telemetry frame batch, a rendering frame, a request-response cycle — and can all be freed simultaneously."
+prompt.prompt = """
+For which pattern is bump/arena allocation most appropriate in the Meridian pipeline?
+"""
+context = """
+Bump allocation is optimal when objects are created together and destroyed together —
+batch processing is the canonical use case. A telemetry frame batch: all 1,000 frames
+are allocated during ingestion, all processed together, all freed at the end of the
+processing epoch. This maps perfectly to one arena per batch.
+
+Arenas do NOT work for:
+- Mixed lifetimes (some objects survive longer than others)
+- Individual deallocation in arbitrary order (requires a free list, not a bump pointer)
+- Objects that may need to be reallocated at different sizes
+
+For fixed-size same-lifetime objects with individual deallocation, use a pool allocator
+(slab of fixed-size slots with a free list) rather than a bump allocator.
+"""
