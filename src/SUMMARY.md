@@ -1,6 +1,7 @@
 # Summary
 
 # Meridian Space Academy
+[Overview]()
 ---
 - [Module 1: Async Rust Fundamentals](./module01_async_rust_fundamentals/README.md)
   - [Async Await Model](./module01_async_rust_fundamentals/async_await_model.md)
@@ -24,4 +25,8 @@
   - [UDP](./module04_networking_programming/udp.md)
   - [HTTP Clients](./module04_networking_programming/http_clients.md)
   - [Project: Ground Station Client](./module04_networking_programming/project_gs_client.md)
+---
+- [Data Oriented Programming]()
+---
+- [Performance & Profiling]
 ---
