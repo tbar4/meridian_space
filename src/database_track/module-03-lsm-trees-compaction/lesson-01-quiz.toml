@@ -1,0 +1,107 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR LSM engine has a 4MB memtable threshold. During a fragmentation event, writes arrive
+at 5MB/sec. The flush thread writes SSTs at 2MB/sec. After 10 seconds, how many frozen
+memtables are queued for flush?
+"""
+prompt.distractors = [
+  "0 — the flush thread keeps up because SSTs are compressed.",
+  "10 — one per second of the burst.",
+  "2 — the memtable threshold is 4MB and only 2 fit."
+]
+answer.answer = "Approximately 7–8. In 10 seconds, 50MB arrives and 20MB is flushed. The 30MB backlog across 4MB memtables = ~7-8 frozen memtables."
+context = """
+Write rate: 5 MB/s * 10 s = 50 MB. Flush rate: 2 MB/s * 10 s = 20 MB flushed. Backlog: 30 MB
+in frozen memtables. At 4 MB each, that is 7-8 frozen memtables plus the active mutable one.
+This triggers write backpressure — the engine should stall writers when the frozen queue exceeds
+a configured limit to prevent unbounded memory growth.
+"""
+id = "fc198e5e-9e5a-4546-b117-0c420c350c16"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+An engineer deletes NORAD ID 25544 from the OOR LSM engine. The delete writes a tombstone to
+the memtable. A subsequent read for 25544 should check SST Level 1 (which contains the original
+record). What does the read return?
+"""
+prompt.distractors = [
+  "The original TLE record — tombstones only take effect during compaction.",
+  "An error — deleted keys cannot be read.",
+  "A partial record — the tombstone masks some fields but not others."
+]
+answer.answer = "None — the read path checks the memtable first (newest), finds the tombstone, and returns 'deleted' without ever reading the SST."
+context = """
+The LSM read path checks newest sources first. The tombstone in the memtable is newer than the
+record in SST L1. When the read path encounters a tombstone, it returns None immediately. The
+tombstone persists until compaction merges it with the SST containing the original record. At
+that point, both the tombstone and the old record are removed. Removing a tombstone before
+the old value is compacted away would resurrect the deleted record.
+"""
+id = "ccf07322-657d-4673-ac2d-85826ee0a4a9"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR LSM engine encodes keys as big-endian u32 bytes. An engineer proposes using native
+endian (`to_ne_bytes()`) for performance. What breaks on little-endian systems?
+"""
+prompt.distractors = [
+  "Nothing — both produce the same bytes on x86.",
+  "The SST index block cannot parse native-endian keys.",
+  "Tombstone detection fails because the empty value marker changes."
+]
+answer.answer = "Byte-wise key comparison produces wrong sort order. NORAD ID 256 (0x00000100 big-endian) sorts before 1 (0x00000001), but in little-endian 1 encodes as 0x01000000, which sorts after 256's 0x00010000."
+context = """
+LSM engines rely on byte comparison for key ordering in SSTs and during merges. Big-endian
+preserves numeric order under byte comparison. Little-endian reverses byte significance, so
+1 > 256 under memcmp. This corrupts every sorted structure: memtable iteration order, SST
+block ordering, index block binary search, and merge iterators. The performance difference
+between to_be_bytes and to_ne_bytes is zero on x86 — both are a single instruction.
+"""
+id = "7dbea42e-7052-4a2b-9d78-f80ff8890282"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    let memtable_size: usize = 4 * 1024 * 1024;
+    let avg_entry_size: usize = 4 + 82;
+    let entries_per_memtable = memtable_size / avg_entry_size;
+
+    let total_objects: usize = 100_000;
+    let flushes = (total_objects + entries_per_memtable - 1) / entries_per_memtable;
+
+    println!("entries={} flushes={}", entries_per_memtable, flushes);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "entries=48770 flushes=3"
+context = """
+Each entry is 86 bytes (4-byte key + 82-byte TLE value). A 4MB memtable holds 4194304 / 86 =
+48770 entries. Loading 100k objects: ceil(100000 / 48771) = 3 flushes. The entire OOR catalog
+produces only 3 SST files during initial load — manageable for the read path.
+"""
+id = "3c0ec93f-304b-4a1a-a523-2e71149636b1"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The B+ tree achieves 200 inserts/sec on HDD. The LSM engine absorbs writes at memtable speed
+then flushes SSTs sequentially. What determines the LSM engine's sustained write throughput?
+"""
+prompt.distractors = [
+  "Memtable insert speed — BTreeMap insertion is O(log N) and bottlenecks at scale.",
+  "SST index block construction — building the binary search index is CPU-intensive.",
+  "Network latency — the WAL must be replicated before acknowledging the write."
+]
+answer.answer = "SST flush throughput — the engine can sustain writes only as fast as it can flush frozen memtables to disk. If writes outpace flushes, backpressure stalls new writes."
+context = """
+The memtable absorbs writes at in-memory speed (millions/sec). But the frozen memtable queue
+drains only as fast as SSTs can be written. Sequential SSD write throughput is 200-500 MB/sec,
+meaning a 4MB SST flushes in 8-20ms. Sustained throughput equals (memtable_size / flush_time)
+entries/sec. With 4MB, 48k entries, and 20ms flush: ~2.4M entries/sec on SSD. BTreeMap inserts
+at ~200ns are not the bottleneck.
+"""
+id = "b79ad3a0-bbbc-4874-9066-276ee98445b4"

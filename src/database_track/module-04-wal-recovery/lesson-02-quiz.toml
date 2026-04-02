@@ -1,0 +1,115 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR engine crashes during a compaction that merges L0 SSTables [1, 2, 3] into a new L1
+SSTable [4]. The manifest has NOT been updated. On recovery, which SSTables does the engine use?
+"""
+prompt.distractors = [
+  "SSTable 4 only — it contains the merged result of SSTables 1–3.",
+  "SSTables 1, 2, 3, and 4 — all are valid and should be included.",
+  "No SSTables — the engine must re-run the compaction before serving reads."
+]
+answer.answer = "SSTables 1, 2, and 3 — the manifest still lists them as active. SSTable 4 is an orphaned partial file that should be deleted during cleanup."
+context = """
+The manifest is the atomicity boundary for compaction. Since it was not updated, the pre-compaction
+state is the authoritative view: SSTables 1, 2, 3 are active. SSTable 4 may be partially written
+or complete, but since the manifest doesn't reference it, the engine treats it as an orphan.
+Recovery cleanup scans the data directory for SSTable files not listed in the manifest and deletes
+them. The compaction will be re-triggered during normal operation. Including SSTable 4 alongside
+1–3 would double-count all the keys, producing incorrect read results.
+"""
+id = "8cf1c706-f7d9-4b82-8090-021176d59325"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+During recovery, the WAL reader finds records from LSN 0 to LSN 8000. The manifest reports the
+highest flushed LSN as 5000. The reader encounters a checksum failure at LSN 7500. How many
+records are replayed into the memtable?
+"""
+prompt.distractors = [
+  "8,000 — all records are replayed regardless of the flushed LSN.",
+  "7,500 — records from LSN 0 through LSN 7500 are replayed.",
+  "5,000 — only records at or below the flushed LSN are replayed."
+]
+answer.answer = "2,499 — records from LSN 5001 through LSN 7499. Records ≤ 5000 are skipped (already in SSTables), and records ≥ 7500 are discarded (corrupt boundary)."
+context = """
+Recovery skips records at or below the flushed LSN (5000) because they are already persisted in
+SSTables. It replays LSN 5001 through LSN 7499 (the last valid record before the corruption at
+7500). That is 7499 - 5001 + 1 = 2,499 records. Record 7500 and everything after it is discarded
+because the checksum failure indicates a partial write — the engine crashed during that record's
+write, so it was never committed. No committed data is lost because records 7500+ were never
+fsync'd.
+"""
+id = "ee42ec21-7b36-432d-8705-4d2f10d47099"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+An engineer proposes using the manifest as the WAL — logging both SSTable state changes AND
+key-value operations in the same file. What is the primary problem with this approach?
+"""
+prompt.distractors = [
+  "The manifest file format cannot encode key-value pairs.",
+  "Combining both log types would prevent WAL truncation entirely.",
+  "The manifest must be read by external tools that don't understand key-value records."
+]
+answer.answer = "The manifest is read on every SSTable state change and on recovery. Mixing high-frequency key-value writes (thousands/sec) into the manifest would make manifest operations slow and manifest recovery would replay millions of records just to reconstruct the SSTable list."
+context = """
+Separation of concerns: the WAL records high-frequency, fine-grained operations (every put/delete).
+The manifest records low-frequency, coarse-grained state changes (SSTable additions/removals,
+~1 per flush or compaction). If combined, the manifest grows at WAL speed (thousands of entries/sec)
+and recovery must parse millions of key-value records just to find the handful of SSTable metadata
+entries. Additionally, WAL truncation would be blocked by the need to retain manifest entries.
+Keeping them separate allows the WAL to be truncated aggressively while the manifest retains the
+full SSTable history compactly.
+"""
+id = "6be65beb-8b31-4275-98d4-25268d274843"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    let flushed_lsn: u64 = 5000;
+    let wal_records: Vec<u64> = vec![4998, 4999, 5000, 5001, 5002, 5003];
+
+    let replayed: Vec<u64> = wal_records.iter()
+        .filter(|&&lsn| lsn > flushed_lsn)
+        .copied()
+        .collect();
+
+    println!("skip={} replay={}", wal_records.len() - replayed.len(), replayed.len());
+}
+"""
+answer.doesCompile = true
+answer.stdout = "skip=3 replay=3"
+context = """
+Records with LSN ≤ 5000 (that is: 4998, 4999, 5000) are skipped — they are already persisted
+in SSTables. Records with LSN > 5000 (5001, 5002, 5003) are replayed into the memtable.
+3 skipped + 3 replayed = 6 total. The flushed_lsn is inclusive: LSN 5000 was the last record
+included in the SSTable flush, so it does not need replay.
+"""
+id = "f2b1b4f7-4548-4882-8a2b-9b1c2ba2e775"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR engine recovers successfully after a crash, replaying 500 WAL records into the memtable.
+The engineer notices the recovered memtable is near its size limit. What should the engine do
+before accepting new writes?
+"""
+prompt.distractors = [
+  "Delete the WAL — it has been fully replayed and is no longer needed.",
+  "Increase the memtable size limit to accommodate the recovered data plus new writes.",
+  "Reject all writes until the memtable is flushed, to prevent a second crash from losing more data."
+]
+answer.answer = "Immediately freeze the recovered memtable and schedule it for flush, then create a fresh active memtable for new writes. This prevents the recovered data from blocking ingestion and starts a new WAL segment."
+context = """
+The recovered memtable is effectively a pre-loaded immutable memtable. Freezing it and scheduling
+a flush ensures the recovered data reaches an SSTable quickly, which in turn allows the old WAL
+segment to be truncated. A fresh active memtable accepts new writes immediately — no downtime.
+Deleting the WAL before flushing would lose durability for the recovered records (they're only in
+memory). Increasing the size limit is a workaround, not a solution. Rejecting writes causes
+unnecessary downtime. The correct protocol: recover → freeze → flush → truncate old WAL → resume.
+"""
+id = "52d47ca3-7205-4a1c-9f64-9a4d924b273b"

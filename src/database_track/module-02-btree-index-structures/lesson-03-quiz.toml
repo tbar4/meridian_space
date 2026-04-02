@@ -1,0 +1,113 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR B+ tree indexes 100,000 NORAD IDs across ~200 leaf pages. A conjunction query needs
+all objects with NORAD IDs in range [40000, 40500]. The query reads 3 leaf pages via the
+linked list. A plain B-tree (no leaf links) with the same keys must serve the same range scan.
+What additional I/O cost does the plain B-tree incur?
+"""
+prompt.distractors = [
+  "No additional cost — both trees store keys in sorted order.",
+  "1 extra page — the B-tree reads its root an additional time.",
+  "200 pages — the B-tree must scan all nodes because it has no sorted leaf chain."
+]
+answer.answer = "The plain B-tree must either re-traverse from the root for each leaf segment or use a stack-based in-order traversal that reads internal nodes between leaf visits, adding I/O for every transition between subtrees."
+context = """
+Without a leaf-level linked list, the B-tree cannot walk from one leaf to the next directly.
+It must either: (1) do a separate root-to-leaf traversal for each group of keys in a different
+subtree (O(K log N) page reads), or (2) maintain a traversal stack and pop back up to internal
+nodes between leaf visits. Either approach reads more pages than the B+ tree's sequential leaf
+chain. For a 500-key range across 3 leaves, the B+ tree reads ~4 pages total (1 root + 3 leaves).
+The B-tree reads at least the same leaf pages plus internal node pages during traversal transitions.
+"""
+id = "4040adb1-6547-4242-a3be-a2048b24e16e"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+An engineer proposes storing B+ tree separator keys in internal nodes as 2-byte truncated
+prefixes instead of full 4-byte NORAD IDs to double the branching factor. What is the risk?
+"""
+prompt.distractors = [
+  "Truncated keys cannot be compared correctly because they lose precision.",
+  "The B+ tree invariant requires internal keys to be exact copies of leaf keys.",
+  "2-byte prefixes would overflow the slot directory in the slotted page format."
+]
+answer.answer = "Two different NORAD IDs that share the same 2-byte prefix would produce identical truncated separators, causing searches to follow the wrong child pointer for keys that differ only in the lower 2 bytes."
+context = """
+Prefix truncation is valid only when the truncated separator still correctly partitions the key
+space between adjacent children. For 4-byte NORAD IDs, a 2-byte prefix preserves only the upper
+16 bits — IDs 40000 (0x9C40) and 40001 (0x9C41) both truncate to 0x9C40. If these IDs end up
+in different children, the truncated separator can't distinguish them. The B+ tree invariant
+does NOT require exact key copies — it requires correct partitioning. The safe approach: compute
+the shortest distinguishing prefix for each specific pair of adjacent children dynamically.
+"""
+id = "c8bfc0b1-8d78-4c52-833d-467514e8044f"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    let total_keys: usize = 100_000;
+    let keys_per_leaf: usize = 509;
+
+    let full_leaves = total_keys / keys_per_leaf;
+    let remainder = total_keys % keys_per_leaf;
+    let total_leaves = if remainder > 0 { full_leaves + 1 } else { full_leaves };
+
+    println!("leaves={} last={}", total_leaves, remainder);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "leaves=197 last=236"
+context = """
+Bulk loading 100,000 keys into leaves with capacity 509: 100000 / 509 = 196 full leaves
+(196 * 509 = 99,764 keys). Remainder: 100,000 - 99,764 = 236 keys in the final leaf.
+Total: 197 leaves. This shows bulk loading's space efficiency — 197 leaves at near-100%
+fill vs. ~300+ leaves at ~50-67% fill for random inserts.
+"""
+id = "42cc22d2-fa64-4e41-8902-b5a2f85af1cf"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR processes a bulk catalog update: 100,000 sorted TLE records. The engineer can either
+(A) drop and rebuild the B+ tree using bulk-load, or (B) update each record with individual
+lookups. Which is faster?
+"""
+prompt.distractors = [
+  "In-place updates — the B+ tree is already built, no need to rebuild internal nodes.",
+  "Both are equivalent — 100,000 records must be processed either way.",
+  "Bulk-load is faster only if the entire dataset fits in RAM."
+]
+answer.answer = "Bulk-load is faster: it writes leaf pages sequentially at O(N), producing near-100% fill. Individual updates require O(N log N) random page reads — one tree traversal per record — and may trigger splits that fragment the tree."
+context = """
+Bulk loading writes leaf pages sequentially — each page filled, written once, never re-read
+during the load. Total: ~200 sequential page writes. Individual updates: one root-to-leaf
+traversal per record, ~2 random page reads each = ~200k random reads. Sequential I/O is
+10-100x faster than random I/O. The tradeoff: bulk-load requires the index to be offline
+during rebuild. If the OOR can tolerate a brief maintenance window, bulk-load wins.
+"""
+id = "7a0d8ec6-8aca-42cf-b973-e3f178469943"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+A B+ tree range scan iterator prefetches the next 2 leaf pages asynchronously while processing
+the current leaf. When does this optimization hurt performance?
+"""
+prompt.distractors = [
+  "It never hurts — prefetching always reduces latency.",
+  "When the disk is an SSD, because SSDs don't benefit from sequential prefetch.",
+  "When the B+ tree has more than 3 levels."
+]
+answer.answer = "For small scans that terminate early — the prefetched pages waste I/O bandwidth and evict useful pages from the buffer pool, all for data the iterator never reads."
+context = """
+Prefetching overlaps I/O with computation, which helps large scans. But for a scan that finds
+its answer in the first leaf and stops (e.g., EXISTS query), the 2 prefetched pages were wasted.
+Worse, they evicted 2 potentially hot pages from the buffer pool, degrading other queries.
+The optimal strategy: enable prefetch adaptively after the scan proves it's large (consumed N
+pages). SSDs still benefit from prefetch — their latency is lower than HDD but still non-zero,
+and prefetch hides it. Tree height is irrelevant to leaf-chain prefetch.
+"""
+id = "28de8d75-e96f-4d93-8c16-7a5577c8b3c0"

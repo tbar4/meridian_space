@@ -1,0 +1,119 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The Orbital Object Registry uses 4KB pages. Each TLE record is 140 bytes and the page header
+is 17 bytes. An engineer calculates the maximum records per page as `(4096 - 17) / 140 = 29`.
+After inserting 29 records, the 30th insert unexpectedly succeeds on the same page. What is
+the most likely explanation?
+"""
+prompt.distractors = [
+  "The page header is compressed at write time, freeing additional space.",
+  "The OS page cache transparently extends the page beyond 4096 bytes.",
+  "The 30th record was written to the page's checksum field, overwriting integrity data."
+]
+answer.answer = "The engineer assumed fixed-size 140-byte records, but the actual serialization uses variable-length encoding (e.g., trimmed trailing spaces), making some records shorter than 140 bytes."
+context = """
+Fixed calculations based on maximum record size give a lower bound on records per page, not the
+exact count. If the storage format uses variable-length encoding, actual record sizes vary. A
+properly implemented slotted page (Lesson 3) tracks free space dynamically rather than assuming
+fixed record sizes. The OS page cache cannot extend a page beyond its defined size, and writing
+to the checksum field would corrupt the page.
+"""
+id = "afa0ffd6-9abd-49b6-aa4a-15da32c382cd"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+A Meridian engineer is debugging a storage engine that occasionally returns corrupted TLE records
+after a power failure. The engine writes pages using `write_all()` but does not call `fsync()`.
+The page checksums always pass validation. What explains the corruption?
+"""
+prompt.distractors = [
+  "CRC32 checksums are too weak to detect the type of corruption caused by power failures.",
+  "The `write_all()` call does not guarantee that all bytes are written to the file.",
+  "The page header's magic bytes were overwritten during the partial write."
+]
+answer.answer = "The OS reordered the writes — the page body was flushed to disk before the header was updated, so the page on disk has a valid checksum over stale or partially-updated body data."
+context = """
+Without `fsync()`, the OS is free to reorder and batch writes. A page write that appears atomic
+in user space may reach disk as two separate operations (header and body) in any order. If power
+fails between them, the page on disk may contain a new header over an old body or vice versa.
+The checksum passes because it was computed over the data that was written — it cannot detect that
+the *combination* of header and body is inconsistent. This is exactly the problem that write-ahead
+logging (Module 4) solves: the WAL provides atomicity guarantees that raw page writes cannot.
+`write_all()` guarantees all bytes reach the kernel buffer — not the disk.
+"""
+id = "add1f4d5-b5c0-457a-af03-d1936f9e88bd"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR storage engine uses little-endian byte encoding for all on-disk integers. A new engineer
+proposes switching to big-endian for the B-tree index pages (Module 2) because big-endian byte
+strings can be compared with `memcmp` for key ordering. The data pages would remain little-endian.
+What is the primary risk of this approach?
+"""
+prompt.distractors = [
+  "Big-endian encoding is slower to serialize on x86 processors due to byte-swap instructions.",
+  "The Rust standard library does not support big-endian byte conversion.",
+  "Big-endian keys cannot be used with CRC32 checksums."
+]
+answer.answer = "Mixed endianness across page types creates a maintenance hazard — any code that reads a multi-byte integer must know which page type it came from, and a mismatch silently produces wrong values rather than a detectable error."
+context = """
+The big-endian `memcmp` optimization is real and used by some engines (e.g., LevelDB/RocksDB use
+big-endian for internal key encoding). But mixing endianness within the same engine means every
+integer read/write must be tagged with its page type context. A bug where data-page code reads
+an index-page integer (or vice versa) will silently produce the wrong value — the bytes are valid,
+just interpreted with the wrong byte order. The x86 byte-swap cost is negligible (one instruction),
+and Rust's `to_be_bytes()`/`to_le_bytes()` are fully supported. The safest approach: pick one
+endianness for the entire engine, or encapsulate the index key encoding so it never leaks.
+"""
+id = "b5340019-57fc-4587-9a8c-f02952903ebd"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    let page_size: usize = 4096;
+    let header_size: usize = 17;
+    let page_id: u32 = 42;
+
+    let offset = page_id as u64 * page_size as u64;
+    let usable = page_size - header_size;
+
+    println!("offset={} usable={}", offset, usable);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "offset=172032 usable=4079"
+context = """
+Page offset calculation is simple multiplication: page 42 starts at byte 42 * 4096 = 172032.
+Usable space per page is the page size minus the header: 4096 - 17 = 4079 bytes. This arithmetic
+is the foundation of all page I/O — given a page ID and page size, you can compute the file offset
+in constant time with no lookup table or indirection.
+"""
+id = "85058263-f27b-4279-81e4-52ed3a871de5"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+An engineer proposes increasing the OOR page size from 4KB to 64KB to reduce the total number
+of pages (from ~4,000 to ~250) and simplify the free list. The workload is predominantly point
+lookups by NORAD catalog ID. What is the most significant performance consequence?
+"""
+prompt.distractors = [
+  "64KB pages exceed the maximum size supported by the Linux page cache.",
+  "The free list will run out of pages faster because each page holds more records.",
+  "CRC32 checksums become unreliable for buffers larger than 4KB."
+]
+answer.answer = "Point lookups now read 64KB from disk to retrieve a single 140-byte TLE record — a 16x increase in I/O amplification compared to 4KB pages, which dominates latency for the OOR's primary access pattern."
+context = """
+I/O amplification is the ratio of bytes read from disk to bytes actually needed. With 4KB pages,
+a point lookup reads 4,096 bytes to get 140 bytes (~29x amplification). With 64KB pages, it reads
+65,536 bytes (~468x amplification). For a workload dominated by point lookups, this 16x increase
+in I/O volume directly increases latency and wastes I/O bandwidth. The Linux page cache supports
+large pages (up to huge page sizes), CRC32 works on arbitrary buffer sizes, and the free list
+concern is about page count, not a performance bottleneck. Larger pages help sequential scan
+throughput — not point lookups.
+"""
+id = "725f161c-2d1e-491d-8f7b-8a616668d616"

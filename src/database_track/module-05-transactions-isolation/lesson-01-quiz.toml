@@ -1,0 +1,128 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+A conjunction query transaction starts at timestamp 100. While it is scanning the catalog,
+a bulk TLE update commits at timestamp 105, modifying 500 objects. The conjunction query then
+reads one of those 500 objects. Under snapshot isolation, which TLE version does it see?
+"""
+prompt.distractors = [
+  "The updated version (timestamp 105) — committed data is always visible.",
+  "No version — the read blocks until the conjunction query commits.",
+  "Either version, depending on which was written to disk first."
+]
+answer.answer = "The pre-update version (committed before timestamp 100). Snapshot isolation reads data as of the transaction's start time, ignoring all commits after that point."
+context = """
+Snapshot isolation guarantees that a transaction sees a consistent view of the database as of
+its start timestamp (100). The bulk update committed at 105, which is after the conjunction
+query started. Under snapshot isolation, the query cannot see any changes committed after its
+read_ts. It reads the version that was current at timestamp 100 — the pre-update TLE. This is
+correct: the conjunction query sees the entire catalog as a consistent snapshot, not a mix of
+old and new data. The update becomes visible to transactions that start after timestamp 105.
+"""
+id = "5c8ec21f-9294-4c20-9a3a-a86f8d3049b5"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+Two concurrent transactions both read that NORAD 43013 has TLE data from two ground stations
+(Alpha and Bravo). Transaction A decides to delete the Bravo TLE (keeping Alpha). Transaction B
+decides to delete the Alpha TLE (keeping Bravo). Both commit under snapshot isolation. What
+happens?
+"""
+prompt.distractors = [
+  "One transaction aborts due to a write conflict, preventing the anomaly.",
+  "Both transactions succeed, and the database retains both TLEs.",
+  "The database detects the invariant violation and rolls back the later commit."
+]
+answer.answer = "Both transactions commit successfully, and NORAD 43013 has NO TLE data — both ground station records are deleted. This is a write skew anomaly that snapshot isolation cannot prevent."
+context = """
+This is a classic write skew: each transaction reads overlapping data (both TLEs exist) and
+writes a disjoint key (A deletes Bravo's TLE, B deletes Alpha's TLE). There is no write-write
+conflict (they modify different keys), so snapshot isolation detects no conflict. Both commit,
+and the combined result violates the invariant 'at least one TLE must exist.' Preventing this
+requires either serializable isolation (which would detect the read-write dependency) or an
+application-level check (SELECT FOR UPDATE or explicit lock on the NORAD ID).
+"""
+id = "be8587d5-38b4-4841-8119-fff78b1ac919"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR uses Read Committed isolation for a status dashboard that displays the current count of
+tracked objects. A bulk import adds 5,000 new objects in a single transaction. The dashboard
+reads the count before and after the import commits. What does it see?
+"""
+prompt.distractors = [
+  "The count increases by 5,000 between the two reads — both reads see the committed import.",
+  "Both reads show the same count because the dashboard sees a consistent snapshot.",
+  "The first read may show a partial count (e.g., 3,000 of 5,000) if the import is in progress."
+]
+answer.answer = "The count increases by 5,000 between the two reads — both reads see the committed import."
+context = """
+Read Committed isolation means each statement sees only committed data, but different statements
+within the same transaction can see different committed states. If the first count query runs
+before the import commits and the second runs after, the count jumps by 5,000. This is a
+non-repeatable read — the same query returns different results within the same transaction.
+Under snapshot isolation, both reads would see the same count (the snapshot at transaction start).
+Read Committed does NOT show partial imports — it sees either the entire import or none of it,
+because the import is one transaction (atomic). The count is either pre-import or post-import.
+"""
+id = "7df518e7-33d7-4ee0-866f-4a01857cc8ba"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+Which ACID property does the WAL (Module 4) primarily provide?
+"""
+prompt.distractors = [
+  "Atomicity — the WAL ensures all-or-nothing execution of transactions.",
+  "Consistency — the WAL enforces application invariants.",
+  "Isolation — the WAL prevents concurrent transactions from interfering."
+]
+answer.answer = "Durability — the WAL ensures that committed transactions survive crashes by logging operations to durable storage before they are applied to volatile state."
+context = """
+The WAL's primary purpose is durability: once fsync'd, the logged operations survive any crash.
+Atomicity can partially use the WAL (by replaying or discarding incomplete transaction records),
+but atomicity in the general case requires additional mechanisms (write batches, transaction
+abort logic). Consistency is the application's responsibility. Isolation is provided by locking
+or MVCC (this module's topic), not the WAL. The WAL does contribute to atomicity in practice
+(Module 4's recovery either replays all or none of a WAL batch), but its defining purpose is
+durability.
+"""
+id = "2b2cb091-0cd4-4c8c-a576-1f8b624f0f7c"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    // Simulate snapshot isolation reads
+    let committed_versions: Vec<(u64, &str)> = vec![
+        (50, "tle_v1"),
+        (80, "tle_v2"),
+        (110, "tle_v3"),
+    ];
+
+    let read_ts: u64 = 100;
+
+    // Find the latest version visible at read_ts
+    let visible = committed_versions.iter()
+        .filter(|(ts, _)| *ts <= read_ts)
+        .last();
+
+    match visible {
+        Some((ts, val)) => println!("ts={} val={}", ts, val),
+        None => println!("not_found"),
+    }
+}
+"""
+answer.doesCompile = true
+answer.stdout = "ts=80 val=tle_v2"
+context = """
+With read_ts=100, the transaction sees all versions committed at or before timestamp 100.
+Versions at ts=50 (tle_v1) and ts=80 (tle_v2) are both visible. Version at ts=110 (tle_v3)
+is NOT visible (committed after the snapshot). The latest visible version is ts=80, tle_v2.
+This is how MVCC snapshot reads work: scan versions for the key, filter by read_ts, take the
+newest visible version. The ts=110 version will be visible to transactions that start at
+timestamp 110 or later.
+"""
+id = "8160338c-427d-4600-9696-e4587f0f1223"

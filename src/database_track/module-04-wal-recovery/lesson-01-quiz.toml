@@ -1,0 +1,106 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR LSM engine uses group commit: WAL writes are batched and fsync'd every 50ms. A power
+failure occurs just before an fsync. Approximately how many of the 2,400 TLE records written
+during a 12-minute pass window are at risk of being lost?
+"""
+prompt.distractors = [
+  "All 2,400 — the entire pass window's data is lost.",
+  "0 — the OS page cache ensures all buffered writes survive power failures.",
+  "Approximately 1,200 — half the records since the last SSTable flush."
+]
+answer.answer = "Only the records written in the last 50ms batch — approximately 5–20 records depending on burst rate. All previously fsync'd batches are durable on disk."
+context = """
+Group commit fsync's every 50ms. Records in already-fsync'd batches are durable and survive any
+failure. Only the current unflushed batch (the last 50ms of writes) is at risk. At 2,400 records
+over 720 seconds, the steady-state rate is ~3.3 records/second (~0.17 per 50ms). During burst
+ingestion the rate is higher, so a 50ms batch might contain 5–20 records. The OS page cache does
+NOT guarantee durability across power failures — only fsync provides that guarantee.
+"""
+id = "06583c3e-c457-4cac-a34f-2f270730e971"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+An engineer proposes removing fsync from the WAL entirely. The OS typically flushes dirty pages
+within 30 seconds. What is the worst-case data loss window?
+"""
+prompt.distractors = [
+  "0 seconds — write() guarantees durability.",
+  "Exactly 30 seconds — the OS flush interval is deterministic.",
+  "The time between SSTable flushes, because the WAL is the only durability mechanism."
+]
+answer.answer = "Up to 30+ seconds. The OS dirty page writeback is best-effort, not guaranteed. Under memory pressure or I/O contention, writeback can be delayed further."
+context = """
+Without fsync, the kernel's writeback daemon writes dirty pages according to heuristics (typically
+every 30 seconds via vm.dirty_writeback_centisecs). These are NOT guarantees. Under load, writeback
+can be delayed significantly. A crash loses all WAL data in the page cache that hasn't been
+written to disk. For the OOR, 30 seconds of lost TLE data during a conjunction window is
+unacceptable.
+"""
+id = "e5510b9e-d76e-4040-b28d-43316827aebd"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The WAL reader encounters a record at LSN 4872 with an invalid CRC32 checksum. LSN 4871 was
+valid. What should the recovery process do?
+"""
+prompt.distractors = [
+  "Skip the corrupted record and continue reading — later records may be valid.",
+  "Abort recovery entirely — the database is unrecoverable.",
+  "Repair the record by recalculating the checksum from the key/value bytes."
+]
+answer.answer = "Stop recovery at LSN 4871. The corruption indicates a partial write (crash mid-record). All subsequent records are suspect because the file position may be misaligned."
+context = """
+A checksum failure means the record was not completely written. Records after it cannot be trusted:
+the corruption may have shifted the file position, causing the reader to misparse subsequent bytes.
+The safe approach is to truncate at the last valid record. The 'lost' records were never fsync'd
+and thus never committed — no data the user considered durable is lost.
+"""
+id = "1a759553-4c03-4312-b5ef-cb90d09fd7cf"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    let header_size: usize = 8 + 1 + 2 + 2 + 4; // LSN + type + key_len + val_len + checksum
+    let key_size: usize = 4;
+    let value_size: usize = 82;
+    let record_size = header_size + key_size + value_size;
+
+    let wal_budget_mb: usize = 64;
+    let records_per_wal = (wal_budget_mb * 1024 * 1024) / record_size;
+
+    println!("record={}B capacity={}", record_size, records_per_wal);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "record=103B capacity=651542"
+context = """
+Each WAL record: 17 bytes header + 4 bytes key + 82 bytes value = 103 bytes. A 64MB WAL holds
+64 × 1024 × 1024 / 103 = 651,542 records — over 650k TLE updates before needing truncation.
+WAL truncation is triggered by SSTable flushes, not by size limits.
+"""
+id = "42198ac1-dca1-4bf8-9d3b-e4eb496448a7"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR flushes its memtable to an SSTable at LSN 5000. The WAL contains records from LSN 0
+to LSN 5200. Which WAL records can be safely truncated?
+"""
+prompt.distractors = [
+  "All records — the SSTable flush makes the entire WAL redundant.",
+  "Records LSN 5000–5200 — they were included in the flush.",
+  "No records can be truncated until the next checkpoint."
+]
+answer.answer = "Records LSN 0–5000. These are persisted in the SSTable. Records 5001–5200 are only in the active memtable and must be retained for crash recovery."
+context = """
+The flushed LSN (5000) is the boundary: everything at or below it is durable in the SSTable.
+Everything above exists only in the memtable and WAL. Truncating 0–5000 recovers space and
+reduces future replay time. Records 5001–5200 were NOT flushed — they are in the active memtable
+created after the freeze.
+"""
+id = "de5d50ba-ace6-4961-820c-098d32608d76"

@@ -1,0 +1,121 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+A conjunction query (Transaction A) holds shared locks on 50 TLE records. A bulk TLE update
+(Transaction B) needs exclusive locks on 10 of those same records. Under strict 2PL, what
+happens?
+"""
+prompt.distractors = [
+  "Transaction B acquires its exclusive locks and Transaction A's reads are invalidated.",
+  "Both transactions proceed concurrently — shared and exclusive locks are compatible.",
+  "Transaction A is aborted because write transactions have higher priority."
+]
+answer.answer = "Transaction B blocks and waits. The shared locks held by Transaction A are incompatible with Transaction B's exclusive lock requests. B cannot proceed until A commits and releases its shared locks."
+context = """
+Shared-exclusive incompatibility is the core of 2PL's blocking behavior. Transaction A's shared
+locks prevent any exclusive lock on the same keys. Transaction B must wait until A commits (which
+may take seconds for a conjunction query). This is exactly the problem for the OOR: a long-running
+read blocks concurrent writes. Under MVCC (Lesson 3), Transaction B would proceed immediately
+because readers use snapshot isolation and never acquire locks that block writers.
+"""
+id = "f0521166-acae-4c35-90d4-1e76bad6880d"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+Transaction A holds an exclusive lock on key X and requests a shared lock on key Y. Transaction B
+holds an exclusive lock on key Y and requests a shared lock on key X. What is the state of the
+system under 2PL?
+"""
+prompt.distractors = [
+  "Both transactions proceed — shared lock requests are always compatible with existing exclusive locks from other transactions.",
+  "Transaction A proceeds because it requested first; Transaction B waits.",
+  "Both transactions abort due to a lock upgrade conflict."
+]
+answer.answer = "Deadlock. Transaction A waits for B to release Y, and Transaction B waits for A to release X. Neither can proceed. The lock manager must detect the cycle and abort one transaction."
+context = """
+This is a classic deadlock: A holds X, wants Y. B holds Y, wants X. A circular dependency means
+neither can make progress. Wait-for graph: A → B (A waits for B on key Y), B → A (B waits for
+A on key X). The cycle A → B → A is detected, and the lock manager aborts one transaction
+(typically the younger or cheaper one). The aborted transaction releases its locks, allowing the
+other to proceed. Shared-exclusive incompatibility is what creates the wait: a shared lock request
+on a key held exclusively by another transaction must wait.
+"""
+id = "6352408f-d770-4b2f-9fd9-73b66638405e"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+Under strict 2PL, a transaction reads keys A, B, C and then writes key D. At what point can
+the shared locks on A, B, C be released?
+"""
+prompt.distractors = [
+  "Immediately after each key is read — the growing phase only applies to exclusive locks.",
+  "After key D is written — the shrinking phase begins when the first lock is released.",
+  "Never — strict 2PL requires all locks to be held for the lifetime of the database."
+]
+answer.answer = "At commit time — strict 2PL holds all locks (shared and exclusive) until the transaction commits or aborts, releasing them all at once."
+context = """
+In strict 2PL, there is no early release. All locks — both shared and exclusive — are held until
+commit. This prevents cascading aborts: if shared locks on A, B, C were released early and
+another transaction read those keys, then this transaction aborted, the other transaction would
+have read data from an aborted transaction (a dirty read). Strict 2PL eliminates this risk at
+the cost of holding locks longer, which increases contention. The 'two phases' in strict 2PL
+collapse to: growing phase = entire transaction, shrinking phase = instant release at commit.
+"""
+id = "456aa969-ad36-4148-ac14-207b92aa4365"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    // Simulate lock compatibility check
+    let shared_holders = 3u32;  // 3 transactions hold shared locks
+    let request_exclusive = true;
+
+    let can_grant = if shared_holders == 0 {
+        true
+    } else if request_exclusive {
+        false // Exclusive is incompatible with any existing holder
+    } else {
+        true  // Shared is compatible with shared
+    };
+
+    println!("holders={} exclusive={} granted={}", shared_holders, request_exclusive, can_grant);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "holders=3 exclusive=true granted=false"
+context = """
+3 transactions hold shared locks. An exclusive lock request arrives. The compatibility check:
+shared_holders > 0 AND request is exclusive → cannot grant. The requester must wait until all
+3 shared holders release their locks. Even though each shared holder could independently release,
+the exclusive requester cannot proceed until ALL shared locks are gone. This demonstrates why
+2PL is particularly punishing for workloads where long-running reads (shared locks) overlap with
+writes (exclusive locks) — the writer waits for the slowest reader.
+"""
+id = "cb478aa8-4d81-47a5-992f-41177372196f"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR processes 500 conjunction queries per second (each reading ~50 TLE records) and 100
+TLE updates per second (each writing 1 record). Under strict 2PL with shared/exclusive locks
+on individual TLE records, what is the expected contention pattern?
+"""
+prompt.distractors = [
+  "No contention — reads and writes target different records since the catalog has 100k objects.",
+  "Deadlocks occur on every write because reads hold locks on all 100k objects.",
+  "Writes are never blocked because there are more reads than writes."
+]
+answer.answer = "Low but non-zero contention. With 500 queries × 50 records = 25,000 shared lock-seconds per second over a 100k catalog, any single record has a ~25% chance of being read-locked at any given moment. 100 writes/sec will frequently stall on shared locks."
+context = """
+25,000 record-reads per second over 100,000 records means each record is read ~0.25 times per
+second. If each read holds the lock for ~10ms, then at any instant, ~250 records are read-locked
+(0.25 reads/sec × 0.01 sec hold time × 100k records... actually 500 queries × 50 records × 0.01s
+hold time = 250 concurrent read locks). A write targeting a random record has a 250/100,000 =
+0.25% chance of hitting a read-locked record. At 100 writes/sec, that is ~0.25 stalled writes/sec
+— low but non-zero. During burst ingestion (1000 writes/sec), stalls increase proportionally.
+Under MVCC, writers never wait for readers — zero stalls regardless of contention.
+"""
+id = "a22d442c-4f5d-4005-bdad-a58e16b65a0f"

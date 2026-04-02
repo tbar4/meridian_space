@@ -1,0 +1,120 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+A filter on `inclination > 80.0` processes 100,000 rows. The volcano model makes 100,000
+next() calls with one comparison each. The vectorized model makes 98 next_batch() calls with
+1,024 comparisons each. Both do 100,000 comparisons total. Why is the vectorized version faster?
+"""
+prompt.distractors = [
+  "The vectorized model skips rows that don't match using branch prediction.",
+  "The vectorized model uses less memory because it processes in chunks.",
+  "The vectorized model does fewer comparisons due to SIMD reduction."
+]
+answer.answer = "The vectorized model's tight loop over a contiguous f64 array stays in L1 cache and enables SIMD (4 or 8 comparisons per instruction). The volcano model's per-row function calls thrash the instruction cache and prevent SIMD."
+context = """
+Both models do the same number of comparisons (100,000). The difference is HOW they do them.
+The vectorized model iterates over a contiguous f64 array — the CPU prefetcher loads the next
+cache line automatically, and the compiler generates SIMD instructions (AVX2 processes 4 f64
+values per instruction, reducing 1024 comparisons to ~256 SIMD operations). The volcano model
+makes 100,000 function calls, each touching different memory (operator struct, row struct, etc.),
+causing instruction cache misses and preventing SIMD. The batch amortizes per-call overhead
+(virtual dispatch, stack frame setup) across 1024 rows instead of 1.
+"""
+id = "0a152d39-01a2-4c08-9bcf-e16020b68243"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    let total_rows: usize = 100_000;
+    let batch_size: usize = 1024;
+    let operators: usize = 5;
+
+    let volcano_calls = total_rows * operators;
+    let vec_calls = ((total_rows + batch_size - 1) / batch_size) * operators;
+
+    println!("volcano={} vectorized={} ratio={:.0}x",
+        volcano_calls, vec_calls, volcano_calls as f64 / vec_calls as f64);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "volcano=500000 vectorized=490 ratio=1020x"
+context = """
+Volcano: 100,000 rows × 5 operators = 500,000 next() calls.
+Vectorized: ceil(100,000 / 1024) = 98 batches × 5 operators = 490 next_batch() calls.
+Ratio: 500,000 / 490 ≈ 1020x fewer function calls. Each vectorized call does more work
+(processing 1024 rows), but the per-call overhead (function dispatch, cache warmup) is
+amortized. This 1000x reduction in function call overhead is why vectorized engines dominate
+for analytical workloads.
+"""
+id = "e8cc346c-ba11-434a-ba47-117492ac9503"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+A vectorized filter produces a selection vector [0, 3, 7, 12] from a batch of 1024 rows. The
+next operator (a projection) needs to compute `epoch * 2.0` for only the selected rows. What
+is the advantage of using the selection vector instead of copying the 4 rows into a new batch?
+"""
+prompt.distractors = [
+  "No advantage — copying 4 rows is trivially fast regardless.",
+  "The selection vector allows the projection to modify the original batch in-place.",
+  "The selection vector enables parallel processing of the 4 rows on different CPU cores."
+]
+answer.answer = "The selection vector avoids allocating and copying a new batch (memory allocation + memcpy for all columns). The projection applies the computation to 4 values using indexed access into the original arrays — zero allocation, zero copy."
+context = """
+For 4 matching rows out of 1024, the savings from avoiding a copy are modest. But across thousands
+of batches and multiple operators in a pipeline, avoiding allocation and copy at each stage adds
+up. More importantly, the selection vector pattern is consistent — the same mechanism works whether
+4 or 900 rows match, and the original batch memory can be reused without fragmentation. In
+production vectorized engines (DuckDB, DataFusion), selection vectors are the primary mechanism
+for avoiding intermediate materialization.
+"""
+id = "31847b06-752f-4c21-8498-e874023bc779"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR catalog merge needs to compare inclination values from 5 sources for 100,000 objects.
+In columnar format, the inclination column is a contiguous `Vec<f64>` of 100,000 values. On
+a CPU with 256-bit AVX2 SIMD, how many f64 comparisons can be done per SIMD instruction?
+"""
+prompt.distractors = [
+  "1 — SIMD operates on integers, not floating point.",
+  "8 — AVX2 processes 8 f64 values per instruction.",
+  "256 — one comparison per bit of the SIMD register."
+]
+answer.answer = "4 — a 256-bit AVX2 register holds 4 × 64-bit floating point values, so one SIMD comparison instruction compares 4 f64 pairs simultaneously."
+context = """
+AVX2 registers are 256 bits wide. An f64 is 64 bits, so 256/64 = 4 values fit in one register.
+A single `_mm256_cmp_pd` instruction compares 4 pairs of f64 values simultaneously, producing a
+4-element mask of results. For 100,000 comparisons, SIMD reduces the instruction count from
+100,000 to ~25,000. With AVX-512 (512-bit registers), 8 f64 values fit per register. The Rust
+compiler can auto-vectorize tight loops over contiguous f64 arrays — you don't need to write
+intrinsics manually in most cases. The columnar layout is what makes this possible: the values
+must be contiguous in memory for SIMD to work.
+"""
+id = "de024ca7-d271-4506-979b-affcb832c1d8"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+A pipeline has three stages: Scan → Filter (10% selectivity) → Hash Join. Under the volcano
+model, how many rows does the Hash Join's probe side process? Under vectorized execution with
+batch size 1024, how many batches?
+"""
+prompt.distractors = [
+  "100,000 rows / 100 batches — the filter doesn't reduce the count for the hash join.",
+  "10,000 rows / 10 batches — both models process the same number of filtered rows in the same format.",
+  "10,000 rows / 1 batch — all filtered rows fit in a single batch."
+]
+answer.answer = "10,000 rows in both models (10% of 100,000 pass the filter). Under volcano: 10,000 next() calls. Under vectorized: ~10 batches (10,000 / 1024 ≈ 10 batches of varying fill)."
+context = """
+The filter's 10% selectivity means 10,000 rows pass to the hash join. Both models process the
+same logical rows — vectorized execution doesn't change selectivity. The difference is mechanical:
+volcano makes 10,000 individual next() calls to the hash join. Vectorized execution makes ~10
+next_batch() calls, each containing ~1,000 rows. The hash join's probe-side processing is
+identical in cost (10,000 hash lookups), but the vectorized version does them in a tight loop
+over a contiguous key array, enabling cache prefetching and potential SIMD hashing.
+"""
+id = "cfe724ab-206b-4464-b8c7-9afe5ada42fe"

@@ -1,0 +1,120 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR engine takes a fuzzy checkpoint at LSN 10,000. The active memtable contains records
+from LSN 9,500 to LSN 10,000. The WAL contains records from LSN 8,000 to LSN 10,000.
+Which WAL records can be safely truncated after the checkpoint?
+"""
+prompt.distractors = [
+  "All records up to LSN 10,000 — the checkpoint covers everything.",
+  "Records LSN 8,000–10,000 — the entire WAL can be deleted.",
+  "No records — fuzzy checkpoints do not enable WAL truncation."
+]
+answer.answer = "Records with LSN < 9,500. The memtable's minimum LSN (9,500) is the recovery starting point. Records 9,500–10,000 must be retained because they are in the memtable (not yet flushed)."
+context = """
+A fuzzy checkpoint does not flush the memtable, so records in the active memtable (LSN 9,500–10,000)
+must survive in the WAL for crash recovery. The minimum recovery LSN is 9,500 — the earliest
+memtable record. WAL records below 9,500 (i.e., 8,000–9,499) are safe to truncate because they
+are already persisted in SSTables (their flushed LSN is ≥ 9,499). After a sharp checkpoint
+(which flushes the memtable), ALL records up to 10,000 could be truncated — but the fuzzy
+checkpoint defers the flush to avoid blocking writes.
+"""
+id = "584db8a9-c835-404d-9d88-77f6fbd34e47"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR engine has been running for 12 hours without a checkpoint. The WAL contains 2 million
+records. The engine crashes and must recover. What is the primary performance impact of the
+missing checkpoint?
+"""
+prompt.distractors = [
+  "Recovery fails — the WAL is too large to replay.",
+  "The SSTables are corrupted because the manifest was not checkpointed.",
+  "The recovered memtable will exceed its size limit, causing an immediate crash on restart."
+]
+answer.answer = "Recovery must scan and skip all 2 million WAL records to find the ones above the flushed LSN. Even if only 50,000 need replay, parsing 2 million records adds significant I/O and CPU time to recovery."
+context = """
+Without a checkpoint, the WAL has never been truncated. Recovery must open the full WAL file
+and scan from the beginning. Records below the flushed LSN are skipped (not replayed), but they
+must still be read and parsed to advance the reader's position. At ~100 bytes per record, 2M
+records is ~200MB of sequential reads — roughly 1–2 seconds on SSD. The actual replay (records
+above flushed LSN) is fast, but the scan of stale records is wasted work. Regular checkpoints
+(and WAL truncation) keep recovery fast by eliminating the stale prefix. The SSTables and manifest
+are fine — checkpoints don't affect their integrity.
+"""
+id = "86b57168-1122-44f3-a63f-85b5d0719b64"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR uses 64MB WAL segments. The segment manager tracks the max LSN per segment. Segment 5
+has max LSN 4,800. Segment 6 has max LSN 5,300. The current flushed LSN is 5,000. Which
+segments can be safely deleted?
+"""
+prompt.distractors = [
+  "Segments 5 and 6 — both have records at or below the flushed LSN.",
+  "Neither — segments cannot be deleted while the engine is running.",
+  "Segment 6 only — it is the oldest segment still needed."
+]
+answer.answer = "Segment 5 only — its max LSN (4,800) is below the flushed LSN (5,000), so all its records are persisted in SSTables. Segment 6 has records above 5,000 (LSN 5,001–5,300) that are still needed."
+context = """
+A segment is safe to delete only when ALL its records are below the recovery starting point.
+Segment 5's max LSN is 4,800 < 5,000 → all records are in SSTables → safe to delete.
+Segment 6's max LSN is 5,300 > 5,000 → it contains records 5,001–5,300 that are only in the
+memtable → must retain. This conservative approach (delete only when max_lsn < threshold)
+ensures no needed record is lost, even if records within a segment are not strictly ordered.
+"""
+id = "2383f992-1ccc-41fd-b205-dc0112d02a18"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    let checkpoint_interval_sec: u64 = 60;
+    let writes_per_sec: u64 = 3000;
+    let record_size_bytes: u64 = 103;
+
+    let max_replay_records = checkpoint_interval_sec * writes_per_sec;
+    let max_wal_size_mb = (max_replay_records * record_size_bytes) / (1024 * 1024);
+    let replay_time_ms = max_replay_records / 1000; // ~1µs per insert
+
+    println!("records={} wal={}MB time={}ms",
+        max_replay_records, max_wal_size_mb, replay_time_ms);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "records=180000 wal=17MB time=180ms"
+context = """
+With 60-second checkpoint intervals and 3,000 writes/sec, the worst-case WAL replay is 180,000
+records. At 103 bytes each, that is 18.5MB on disk (truncated to 17MB by integer division).
+At ~1µs per memtable insert, replay takes ~180ms. This is comfortably within the OOR's 30-second
+recovery SLA. The WAL segment size should be at least 18MB to avoid splitting a single checkpoint
+interval across too many segments. A 64MB segment holds ~3.5 checkpoint intervals, which means
+at most 2 segments need to be retained at any time.
+"""
+id = "ed1a6d9e-992b-402a-bd91-3e0765d1b2b2"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+An engineer proposes taking a sharp checkpoint (freeze + flush memtable) every 10 seconds to
+minimize recovery time. During a pass window with 3,000 writes/sec, what is the operational
+consequence?
+"""
+prompt.distractors = [
+  "No consequence — flushes are fast and don't affect write throughput.",
+  "The memtable never accumulates enough data, so SSTables are very small, increasing compaction frequency and L0 SSTable count.",
+  "The WAL file grows larger because each flush adds a checkpoint record."
+]
+answer.answer = "The memtable never accumulates enough data, so SSTables are very small, increasing compaction frequency and L0 SSTable count."
+context = """
+At 3,000 writes/sec and 10-second flushes, each SSTable contains only 30,000 records (~3MB).
+This creates many small SSTables in L0, which increases read amplification (more SSTables to
+check) and triggers frequent compaction (L0 count threshold hit more often). Each compaction
+merges small files with diminishing returns. The better approach: use fuzzy checkpoints every
+10 seconds (for WAL truncation) but flush the memtable on its normal size-based threshold
+(e.g., 16MB, which at 3,000 writes/sec fills every ~50 seconds). This decouples checkpoint
+frequency from flush frequency.
+"""
+id = "8ebfcc16-4ef4-45dc-a928-3249c3230a37"

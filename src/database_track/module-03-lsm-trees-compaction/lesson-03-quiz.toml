@@ -1,0 +1,111 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR LSM engine has bloom filters with 1% FPR on each SST. The engine has 5 L0 SSTs and
+3 sorted levels (L1, L2, L3). A point lookup for a key that exists only in L3 must check
+all L0 SSTs and each level. What is the expected number of disk reads (data block reads)?
+"""
+prompt.distractors = [
+  "8 — one per SST and level (5 + 3).",
+  "3 — one per sorted level, L0 is skipped because it only contains recent data.",
+  "0 — bloom filters eliminate all disk reads."
+]
+answer.answer = "Approximately 1.08 — the L3 SST requires 1 read. Each of the 7 other sources (5 L0 + L1 + L2) has a 1% chance of a false positive, adding 0.07 expected reads. Total: ~1.08."
+context = """
+The bloom filter on L3's SST says 'maybe' (true positive), so we read 1 data block. Each of the
+other 7 sources has a 1% false positive rate, contributing 7 * 0.01 = 0.07 expected false positive
+reads. Total expected disk reads: 1 + 0.07 = 1.07. This is nearly optimal — without bloom
+filters, all 8 sources would require disk reads. Bloom filters make LSM point lookups competitive
+with B+ tree lookups in practice.
+"""
+id = "d3aa2b6e-9746-48e7-aff8-931c7e7832cc"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+An engineer configures the block cache at 512MB for the OOR engine. The total SST data on disk
+is 400MB. After the engine warms up, the block cache hit rate is 100%. Should the engineer
+reduce the cache size to save memory?
+"""
+prompt.distractors = [
+  "Yes — a 100% hit rate means the cache is oversized and wasting memory.",
+  "No — reducing the cache would cause disk reads and spike latency.",
+  "Yes — but only by exactly 112MB (512 - 400)."
+]
+answer.answer = "It depends on whether the working set will grow. If the OOR catalog is expected to grow (new debris objects), keeping headroom prevents cache eviction spikes. If the data size is stable, reclaiming some cache for other uses is reasonable — but leave margin."
+context = """
+A 100% hit rate with the entire dataset cached means the engine operates entirely from memory —
+ideal for latency. But 512MB for 400MB of data leaves 112MB unused. If the catalog grows
+(fragmentation events can add thousands of objects), that headroom will absorb growth without
+cache eviction. If data is stable, the excess cache is wasted. The key insight: cache sizing
+is forward-looking, not just a snapshot optimization. Production systems typically allocate
+cache at 1.5-2x the expected working set to absorb growth and background compaction I/O.
+"""
+id = "2eb50085-fbef-4c46-9108-6a2575d9b7a6"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    let num_keys: usize = 48_771;
+    let bits_per_key: usize = 10; // ~1% FPR
+
+    let total_bits = num_keys * bits_per_key;
+    let total_bytes = (total_bits + 7) / 8;
+    let total_kb = total_bytes / 1024;
+
+    println!("bits={} bytes={} kb={}", total_bits, total_bytes, total_kb);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "bits=487710 bytes=60964 kb=59"
+context = """
+With 10 bits per key and 48,771 keys per SST, the bloom filter uses 487,710 bits = 60,964 bytes
+= ~59 KB. This is small enough to keep in memory permanently — even with 100 SSTs, the total
+bloom filter memory is ~6 MB. The cost of increasing to 15 bits/key (0.1% FPR) would be ~89 KB
+per SST — still negligible for the OOR's scale.
+"""
+id = "252b9458-42da-4e2a-9e5e-10a911336b5d"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+A conjunction query scans NORAD IDs [40000, 40500]. The engine has bloom filters on every SST.
+Can the bloom filters help optimize this range scan?
+"""
+prompt.distractors = [
+  "Yes — check the bloom filter for each key in the range (40000, 40001, ..., 40500).",
+  "Yes — bloom filters support range membership queries natively.",
+  "Partially — the filter can check the start and end keys to determine if the range intersects."
+]
+answer.answer = "No — bloom filters only answer point membership queries. A range scan must check all SSTs whose key ranges overlap [40000, 40500]. Fence pointers (min/max key per SST) are the appropriate optimization for range scans."
+context = """
+Bloom filters are designed for exact key lookup, not range queries. Checking 501 individual keys
+against the bloom filter would be technically possible but defeats the purpose — you'd still need
+to read the data blocks to retrieve the values, and the false positive rate across 501 checks
+makes false reads nearly certain. For range scans, the correct optimization is fence pointers:
+the engine stores the min and max key for each SST and skips SSTs whose key range doesn't
+overlap [40000, 40500]. Within sorted levels (L1+), only one SST per level can overlap the range.
+"""
+id = "42dfd57d-28f0-4457-950c-750e26ee09fe"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR block cache uses SST ID + block offset as the cache key. After compaction replaces SST_5
+with SST_12 (containing a superset of SST_5's data), what happens to SST_5's cached blocks?
+"""
+prompt.distractors = [
+  "They are automatically invalidated because SST_5 no longer exists on disk.",
+  "They remain valid and serve reads for SST_12 because the data is the same.",
+  "The block cache detects the compaction and rewrites the cache keys from SST_5 to SST_12."
+]
+answer.answer = "They become stale entries that occupy cache space but will never be accessed (no reader will request SST_5's blocks after it is replaced). They are eventually evicted by LRU as new blocks are cached."
+context = """
+The block cache is passive — it doesn't monitor file system events. After compaction deletes
+SST_5 from the manifest, no new read will request (SST_5, offset). The cached blocks for SST_5
+become dead weight. They won't cause incorrect results (no one reads them), but they waste cache
+space until LRU evicts them. A production optimization: after compaction, proactively purge cache
+entries for deleted SSTs. RocksDB does this by incrementing a cache key prefix on compaction.
+"""
+id = "e4e876e6-ff6c-49be-9eb2-62fa11db4fb5"
