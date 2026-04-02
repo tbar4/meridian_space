@@ -24,6 +24,7 @@ alignment (8, due to the `u64` field).
 
 Output: 16 then 24.
 """
+id = "b2b46e9e-1c47-478b-8993-99513d570ea2"
 
 [[questions]]
 type = "MultipleChoice"
@@ -32,13 +33,13 @@ prompt.distractors = [
   "Use `#[repr(C)]` on the struct — this gives the compiler maximum freedom to minimise padding.",
   "Use `#[repr(packed)]` — this always produces the smallest possible struct."
 ]
-answer.answer = "Order fields by descending alignment (largest first) — `u64` fields before `u32`, `u32` before `u16`, etc. The compiler can then eliminate inter-field padding."
 prompt.prompt = """
 A Meridian engineer is defining a `TelemetryHeader` struct that will be stored in
 a `Vec` of 5 million entries. The struct has fields of types `u64`, `u32`, `u16`,
 `u8`, and another `u64`. What field ordering minimises the struct's size with default
 `repr(Rust)` layout?
 """
+answer.answer = "Order fields by descending alignment (largest first) — `u64` fields before `u32`, `u32` before `u16`, etc. The compiler can then eliminate inter-field padding."
 context = """
 With `repr(Rust)`, the compiler is already free to reorder fields. The way to guide it —
 and to make intent clear — is to declare fields in descending alignment order: `u64` (8),
@@ -48,6 +49,7 @@ order regardless of the compiler's freedom, potentially adding more padding. `re
 removes all alignment padding but causes misaligned accesses which are significantly slower
 on most architectures.
 """
+id = "bb4ae609-85dc-4188-9b19-1bb325c095f4"
 
 [[questions]]
 type = "MultipleChoice"
@@ -56,12 +58,12 @@ prompt.distractors = [
   "False sharing is prevented automatically by the Rust borrow checker.",
   "False sharing only affects reads — concurrent writes to separate fields are always safe."
 ]
-answer.answer = "False sharing occurs when two threads write to different variables that occupy the same 64-byte cache line, causing the line to bounce between CPU caches. Use `#[repr(align(64))]` with padding to isolate them."
 prompt.prompt = """
 The Meridian control plane maintains per-satellite frame counters updated by 48 concurrent
 session tasks. After deployment, profiling shows unexpectedly high cache coherence traffic
 even though each task writes to its own counter. What is happening and how is it fixed?
 """
+answer.answer = "False sharing occurs when two threads write to different variables that occupy the same 64-byte cache line, causing the line to bounce between CPU caches. Use `#[repr(align(64))]` with padding to isolate them."
 context = """
 Each cache line is 64 bytes. If multiple per-satellite counters (each just 8 bytes for a u64)
 are stored consecutively in memory, several counters share each cache line. When task A
@@ -70,6 +72,7 @@ in every other core's cache. Task B then has to reload the line even though its 
 value did not change. The fix is `#[repr(align(64))]` with explicit padding to fill the
 64-byte line, ensuring each counter occupies exactly one cache line that no other task touches.
 """
+id = "16eb16d7-7ab9-44fb-a210-195e2eecefa0"
 
 [[questions]]
 type = "MultipleChoice"
@@ -78,11 +81,11 @@ prompt.distractors = [
   "Use `#[repr(C)]` — it guarantees deterministic layout that C foreign functions can rely on.",
   "Add `#[derive(Copy, Clone)]` — this tells the compiler to optimise the memory layout."
 ]
-answer.answer = "Declare fields in descending alignment order within `repr(Rust)` (the default). The compiler eliminates padding by using larger fields to satisfy alignment requirements of subsequent fields."
 prompt.prompt = """
 A Meridian engineer wants to minimise padding in a Rust-only struct (no FFI) while
 keeping the code idiomatic. Which approach is most appropriate?
 """
+answer.answer = "Declare fields in descending alignment order within `repr(Rust)` (the default). The compiler eliminates padding by using larger fields to satisfy alignment requirements of subsequent fields."
 context = """
 The simplest approach for Rust-only code is to declare fields in descending alignment order
 within the default `repr(Rust)` layout. The compiler reorders fields anyway in `repr(Rust)`,
@@ -91,6 +94,7 @@ definition matches the effective layout. `repr(packed)` works but causes misalig
 and is slower on most CPUs. `repr(C)` is for FFI, not performance. `#[derive(Copy, Clone)]`
 has no effect on memory layout — it only adds trait implementations.
 """
+id = "5c728e78-0724-4e08-8a67-fd3639c85a21"
 
 [[questions]]
 type = "MultipleChoice"
@@ -99,13 +103,13 @@ prompt.distractors = [
   "Use `Box<T>` for all fields regardless of access frequency.",
   "Use `#[repr(C)]` on the combined struct to prevent the compiler from splitting fields."
 ]
-answer.answer = "Keep frequently-accessed fields in a compact header struct, and access cold data (large payloads, metadata) through a separate heap-allocated type. A `Vec<Header>` keeps hot data densely packed for cache-friendly sequential scans."
 prompt.prompt = """
 A Meridian frame router scans 100,000 `TelemetryFrame` structs per second to make
 routing decisions based on `satellite_id` and `sequence`. Each struct also carries a
 variable-length payload of 0–64KB that is only needed when forwarding frames downstream.
 How should the struct be organised for optimal routing performance?
 """
+answer.answer = "Keep frequently-accessed fields in a compact header struct, and access cold data (large payloads, metadata) through a separate heap-allocated type. A `Vec<Header>` keeps hot data densely packed for cache-friendly sequential scans."
 context = """
 Every cache miss loading a struct brings in an entire 64-byte cache line. If the struct
 contains both the 16-byte hot header and a 64KB payload pointer/length, the cache line
@@ -116,3 +120,4 @@ forcing every cache line load to bring in cold bytes that evict other useful hot
 Separate the header into a compact struct (`Vec<Header>` for bulk scanning) and access
 the body only when actually forwarding.
 """
+id = "75b2d49d-492c-472d-b623-83f23f129ef2"

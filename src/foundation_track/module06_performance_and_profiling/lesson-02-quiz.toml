@@ -5,11 +5,11 @@ prompt.distractors = [
   "Profile a debug build with `opt-level = 0` — optimisations change which code runs.",
   "Profile a release build with `strip = true` — smaller binaries profile faster."
 ]
-answer.answer = "Profile a release build with `debug = true` in `[profile.release]`. This preserves debug symbols for readable output while keeping release optimisations active."
 prompt.prompt = """
 A Meridian engineer wants to profile the telemetry processor to find its hot path.
 Which build configuration produces the most useful flamegraph?
 """
+answer.answer = "Profile a release build with `debug = true` in `[profile.release]`. This preserves debug symbols for readable output while keeping release optimisations active."
 context = """
 The goal is to profile the code that actually runs in production. Debug builds contain
 bounds checks, non-inlined function calls, and other overhead that inflates certain
@@ -18,6 +18,7 @@ the best of both: release optimisations (inlining, vectorisation, elimination) p
 debug symbols (DWARF info) so the profiler can resolve function names and line numbers.
 `strip = true` removes debug symbols — the opposite of what you want for profiling.
 """
+id = "85b597dc-78d7-4de9-917b-7d88402b9537"
 
 [[questions]]
 type = "MultipleChoice"
@@ -26,11 +27,11 @@ prompt.distractors = [
   "A wide frame with many equally-sized children — this indicates the hot path.",
   "Frames labelled `[unknown]` — these are always the bottleneck."
 ]
-answer.answer = "A wide flat bar near the top of the flamegraph — width encodes percentage of samples, so the widest frames at the topmost level are where the program spends most time."
 prompt.prompt = """
 After generating a flamegraph for the Meridian telemetry processor, what visual pattern
 indicates the primary hot spot?
 """
+answer.answer = "A wide flat bar near the top of the flamegraph — width encodes percentage of samples, so the widest frames at the topmost level are where the program spends most time."
 context = """
 In a flamegraph, the x-axis encodes the percentage of CPU samples, and the y-axis encodes
 call depth (callee above caller). A wide frame at the top of the stack means that frame
@@ -42,6 +43,7 @@ come from code without debug symbols (kernel, system libraries) — usually not 
 actionable. Wide frames with many small children indicate distributed overhead, not a
 single dominant bottleneck.
 """
+id = "c3d5a74c-01fc-4e68-bff8-68689017ac10"
 
 [[questions]]
 type = "MultipleChoice"
@@ -50,12 +52,12 @@ prompt.distractors = [
   "Rename the function to be longer — longer names are easier to find in the flamegraph.",
   "Use `unsafe` — unsafe functions are profiled separately from safe code."
 ]
-answer.answer = "Use `#[inline(never)]` temporarily — this prevents the compiler from inlining the function into its caller, ensuring it appears as a distinct named frame in the profile."
 prompt.prompt = """
 A Meridian engineer is investigating whether the `compute_crc` function inside the
 frame validation hot path is itself a bottleneck. The flamegraph shows the parent function
 as wide, but `compute_crc` is not visible as a separate frame. What should the engineer do?
 """
+answer.answer = "Use `#[inline(never)]` temporarily — this prevents the compiler from inlining the function into its caller, ensuring it appears as a distinct named frame in the profile."
 context = """
 When a function is inlined into its caller, it disappears from the call stack in the
 profiler — its cost is attributed to the caller. `#[inline(never)]` forces the compiler
@@ -63,6 +65,7 @@ to keep the function as a distinct call site, making it visible as its own frame
 flamegraph. After the investigation, remove `#[inline(never)]` — the compiler's default
 inlining decisions are correct for performance; you added the attribute only for visibility.
 """
+id = "5f5a3156-8254-4cb4-8a67-c14864c0ec32"
 
 [[questions]]
 type = "MultipleChoice"
@@ -71,7 +74,6 @@ prompt.distractors = [
   "The processor has high branch misprediction — rewrite conditionals as branchless operations.",
   "The processor is allocator-bound — increase the heap size."
 ]
-answer.answer = "The processor is memory-bound — a cache miss rate of 12% is high. Investigate data layout: the struct may mix hot and cold fields, or the access pattern may be non-sequential. Apply the SoA and padding techniques from Module 5."
 prompt.prompt = """
 `perf stat` on the Meridian telemetry processor reports:
 
@@ -83,6 +85,7 @@ prompt.prompt = """
 
 What does this indicate about the bottleneck?
 """
+answer.answer = "The processor is memory-bound — a cache miss rate of 12% is high. Investigate data layout: the struct may mix hot and cold fields, or the access pattern may be non-sequential. Apply the SoA and padding techniques from Module 5."
 context = """
 IPC of 1.21 is low — the processor stalls frequently. With only 0.3% branch misses,
 branch misprediction is not the cause. With 12.4% cache miss rate, the processor is
@@ -92,6 +95,7 @@ struct padding waste, AoS accessing cold fields, and lack of hot/cold separation
 A high branch miss rate (> 5%) would instead indicate unpredictable conditionals.
 A high IPC (> 3) with normal cache miss rate would indicate a compute-bound workload.
 """
+id = "68cd4bd8-1981-4fc8-b2e0-a8afa8d4c0ed"
 
 [[questions]]
 type = "MultipleChoice"
@@ -100,12 +104,12 @@ prompt.distractors = [
   "Use debug mode for profiling — debug mode shows more function calls.",
   "Profile with a toy input (n=10) — small inputs profile more accurately."
 ]
-answer.answer = "Run for at least 5–10 seconds of CPU time at production input sizes. At 99 Hz sampling, 10 seconds yields ~1000 samples — enough for statistically meaningful flamegraph widths."
 prompt.prompt = """
 A Meridian engineer profiles the telemetry processor for 200 milliseconds using
 production input sizes. The resulting flamegraph shows only 20 samples and several
 functions appear with equal width. What should the engineer change?
 """
+answer.answer = "Run for at least 5–10 seconds of CPU time at production input sizes. At 99 Hz sampling, 10 seconds yields ~1000 samples — enough for statistically meaningful flamegraph widths."
 context = """
 A profiler sampling at 99 Hz collects about 99 samples per second. 200 milliseconds
 yields ~20 samples — far too few for reliable width encoding. With 20 samples, a function
@@ -116,3 +120,4 @@ Using production input sizes is also essential: a function that is O(n log n) ma
 profile differently at n=10 vs n=10,000. Always profile at the sizes and access
 patterns that reflect real workload.
 """
+id = "8370bc4a-3143-4bc4-b58f-4e4449ac9737"

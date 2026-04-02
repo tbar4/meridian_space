@@ -41,6 +41,7 @@ the count. If you change `with_capacity(100)` to `new()` and push 100 elements, 
 count increases to ~7 (Vec grows by doubling: 4 → 8 → 16 → 32 → 64 → 128 = 6 grows
 plus the initial allocation).
 """
+id = "836b993c-5eae-4aa1-956e-3c4aa5e371e6"
 
 [[questions]]
 type = "MultipleChoice"
@@ -49,12 +50,12 @@ prompt.distractors = [
   "Use `HashMap::new()` and pre-fill it by inserting the expected keys before the benchmark.",
   "Use `BTreeMap` instead — it does not allocate during insertions."
 ]
-answer.answer = "Use `HashMap::with_capacity(expected_batch_size)` — this pre-allocates enough internal storage to avoid reallocation until the map exceeds the specified capacity."
 prompt.prompt = """
 The Meridian deduplication function creates a `HashMap` at the start of each batch
 and fills it with up to 1,000 entries. Allocation profiling shows 7 allocations per
 batch — the HashMap growing through its doubling sequence. How do you eliminate these?
 """
+answer.answer = "Use `HashMap::with_capacity(expected_batch_size)` — this pre-allocates enough internal storage to avoid reallocation until the map exceeds the specified capacity."
 context = """
 `HashMap::new()` starts with zero capacity and allocates on first insert. As entries
 are added, the map exceeds its load factor and reallocates (copies all entries to a
@@ -65,6 +66,7 @@ reallocation. The 7 grow-and-rehash allocations drop to 1 (the initial allocatio
 `HashMap::new()` is appropriate when the number of entries is truly unknown. For
 predictable batch sizes, always use `with_capacity`.
 """
+id = "5074e599-73c4-498d-8d6b-497c27ff223a"
 
 [[questions]]
 type = "MultipleChoice"
@@ -73,12 +75,12 @@ prompt.distractors = [
   "Use `Vec::shrink_to_fit()` after each batch — this returns excess memory to the OS.",
   "Use `Vec::truncate(0)` — this is equivalent to `clear()` but more explicit."
 ]
-answer.answer = "Call `vec.clear()` between batches — `clear()` sets the length to zero but retains the allocated capacity, so subsequent batches reuse the existing allocation without any `malloc`/`free` calls."
 prompt.prompt = """
 A Meridian batch processor creates a `Vec<usize>` for deduplication indices at the
 start of each 1,000-frame batch and drops it at the end. Allocation profiling shows
 one allocation per batch. How do you eliminate this allocation from the hot path?
 """
+answer.answer = "Call `vec.clear()` between batches — `clear()` sets the length to zero but retains the allocated capacity, so subsequent batches reuse the existing allocation without any `malloc`/`free` calls."
 context = """
 `clear()` on a `Vec` sets its `len` to 0 without freeing the backing allocation.
 The `capacity` remains unchanged. On the next batch, pushing elements reuses the
@@ -94,6 +96,7 @@ The pattern: allocate once (in `new()` or `with_capacity()`), clear and reuse
 across batches. The first batch pays the allocation cost; all subsequent batches
 are allocation-free.
 """
+id = "f138e6e3-8939-4fee-b4ed-15ca5ef8c161"
 
 [[questions]]
 type = "MultipleChoice"
@@ -102,12 +105,12 @@ prompt.distractors = [
   "Use the flamegraph from Lesson 2 — allocations are visible as wide `malloc` frames.",
   "Read the Rust documentation — allocation behaviour is guaranteed by the standard library."
 ]
-answer.answer = "Use a counting allocator wrapper (`#[global_allocator]` with atomic counters): reset before the code under test, run the code, then read the count. Assert the count in CI to prevent regressions."
 prompt.prompt = """
 A Meridian engineer wants to verify that the batch processor's hot path makes zero
 allocations after warm-up, and wants this verified automatically in CI on every commit.
 Which approach is correct?
 """
+answer.answer = "Use a counting allocator wrapper (`#[global_allocator]` with atomic counters): reset before the code under test, run the code, then read the count. Assert the count in CI to prevent regressions."
 context = """
 A custom `#[global_allocator]` intercepts every `alloc` call. Resetting the counter
 before the hot path and reading it after gives an exact allocation count — not an
@@ -119,6 +122,7 @@ are happening, but you cannot count them precisely from the flamegraph. Reading 
 tells you the contract for standard types but not whether your specific call sequence
 triggers allocations.
 """
+id = "8879e86b-c54b-4a05-ae5b-a937b0833be5"
 
 [[questions]]
 type = "MultipleChoice"
@@ -127,11 +131,11 @@ prompt.distractors = [
   "`Vec::push()` — every push allocates a new element on the heap.",
   "`HashSet::contains()` — it allocates a temporary hash for comparison."
 ]
-answer.answer = "`format!()` — every call allocates a new `String`. In a hot path, replace with `write!` to a pre-allocated buffer or avoid `String` entirely in favour of a stack buffer."
 prompt.prompt = """
 A Meridian engineer identifies an unexpected allocation in the frame validation hot path.
 Which of these operations is most likely the source?
 """
+answer.answer = "`format!()` — every call allocates a new `String`. In a hot path, replace with `write!` to a pre-allocated buffer or avoid `String` entirely in favour of a stack buffer."
 context = """
 `format!()` always allocates a new `String` — it is one of the most common unexpected
 allocation sources in hot paths. The fix is to use `write!` to a `String` buffer that is
@@ -144,3 +148,4 @@ If the Vec was created with `with_capacity(n)` and fewer than `n` pushes occur, 
 `HashSet::contains()` is entirely non-allocating — it computes a hash and reads from
 the existing backing store.
 """
+id = "57b02e9e-e58f-4a44-8f39-f401f519e474"

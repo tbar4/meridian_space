@@ -5,13 +5,13 @@ prompt.distractors = [
   "Use a `HashMap<u32, OrbitalObject>` — random access by NORAD ID is more cache-efficient than sequential scans.",
   "The layout does not matter — the CPU prefetcher compensates for any memory layout automatically."
 ]
-answer.answer = "Use SoA — store altitudes in a contiguous `Vec<f64>`. The screening loop's working set shrinks from all fields to just altitudes, dramatically reducing cache misses."
 prompt.prompt = """
 The Meridian conjunction screening pass iterates all 50,000 orbital objects and reads
 only `altitude_km` (8 bytes) and `norad_id` (4 bytes) per object. Each `OrbitalObject`
 struct is 80 bytes in total. Which layout most improves cache utilisation for this specific
 operation?
 """
+answer.answer = "Use SoA — store altitudes in a contiguous `Vec<f64>`. The screening loop's working set shrinks from all fields to just altitudes, dramatically reducing cache misses."
 context = """
 With AoS, each iteration loads a full 80-byte struct into cache but uses only 12 bytes.
 That is 85% cache waste — 68 bytes of every object loaded are cold fields that are never
@@ -22,6 +22,7 @@ Eight altitudes fit in one 64-byte cache line. The working set is 50,000 × 8 = 
 which fits in L2 cache. Cache utilisation approaches 100% for the altitude pass.
 The CPU prefetcher's sequential prediction is also maximally effective on a contiguous slice.
 """
+id = "803c2190-ec96-48d5-96ef-bf57870d9c74"
 
 [[questions]]
 type = "MultipleChoice"
@@ -30,12 +31,12 @@ prompt.distractors = [
   "AoS with `#[repr(packed)]` — remove all padding to minimise the struct size.",
   "A `HashMap<u32, OrbitalObject>` — hash maps provide O(1) field access regardless of layout."
 ]
-answer.answer = "AoS — keep all fields in one struct. Looking up a single object by NORAD ID reads one contiguous block; SoA would require multiple cache misses across separate vectors."
 prompt.prompt = """
 The Meridian mission control UI needs to display the full record for a single orbital
 object given its NORAD ID — name, altitude, inclination, operator, launch date. This
 is a random-access, all-fields operation. Which layout is more appropriate?
 """
+answer.answer = "AoS — keep all fields in one struct. Looking up a single object by NORAD ID reads one contiguous block; SoA would require multiple cache misses across separate vectors."
 context = """
 AoS is optimal for per-object random access. A single `OrbitalObject` struct keeps all
 fields in one contiguous allocation. Looking it up requires one cache miss (loading its
@@ -47,6 +48,7 @@ potentially in a different cache line. What was one cache miss becomes five or m
 SoA is better for bulk sequential processing of subsets; AoS is better for single-object
 random access across all fields.
 """
+id = "646fefc2-3888-41f5-a40b-f6a0fcdf81e7"
 
 [[questions]]
 type = "Tracing"
@@ -71,6 +73,7 @@ to 78 KB. This demonstrates why SoA is cache-friendly for bulk float processing:
 10,000-element altitude array has a working set of ~78 KB — well within typical L2 cache
 (512 KB to 2 MB).
 """
+id = "e8123da0-96fb-4c71-8711-0a474cd4c754"
 
 [[questions]]
 type = "MultipleChoice"
@@ -79,11 +82,11 @@ prompt.distractors = [
   "AoS is strictly superior because it keeps related data together.",
   "The optimal layout depends solely on struct size — SoA for structs > 64 bytes, AoS otherwise."
 ]
-answer.answer = "Operations that access a small subset of fields benefit from SoA (smaller working set, better SIMD potential). Operations that access all fields of one entity at a time benefit from AoS (one cache miss fetches everything needed)."
 prompt.prompt = """
 When should the Meridian catalog use SoA versus AoS? Select the most accurate
 general guideline.
 """
+answer.answer = "Operations that access a small subset of fields benefit from SoA (smaller working set, better SIMD potential). Operations that access all fields of one entity at a time benefit from AoS (one cache miss fetches everything needed)."
 context = """
 The access pattern drives the optimal layout. SoA wins when:
 - Only a few fields are read per operation (altitude screening reads 2 of 8 fields)
@@ -99,6 +102,7 @@ The practical solution for a catalog used by both kinds of operations is field g
 keep hot fields in one SoA structure and cold fields in a companion AoS structure,
 indexed by the same position.
 """
+id = "049fdc05-ecab-4552-bb28-68d1439fd06f"
 
 [[questions]]
 type = "MultipleChoice"
@@ -107,13 +111,13 @@ prompt.distractors = [
   "Use `unsafe` transmute to reinterpret the AoS data as SoA in place.",
   "Replace the original struct with a new SoA struct everywhere in the codebase simultaneously."
 ]
-answer.answer = "Extract hot fields into a companion SoA index (`Vec<HotField>`) built from the existing AoS vec. Route hot-path operations through the index; keep existing code using the AoS struct for all other access."
 prompt.prompt = """
 An existing Meridian system stores telemetry frames as `Vec<TelemetryFrame>`. Profiling
 shows the deduplication loop is cache-bound. The loop only reads `satellite_id` and
 `sequence` from each frame. How do you improve cache performance without rewriting
 every callsite that uses `TelemetryFrame`?
 """
+answer.answer = "Extract hot fields into a companion SoA index (`Vec<HotField>`) built from the existing AoS vec. Route hot-path operations through the index; keep existing code using the AoS struct for all other access."
 context = """
 The incremental transition: build a `FrameSequenceIndex { satellite_ids: Vec<u32>,
 sequences: Vec<u64> }` from the existing `Vec<TelemetryFrame>`. Keep both in sync
@@ -122,3 +126,4 @@ contiguous, cache-friendly — while all other code continues to use `TelemetryF
 unchanged. This avoids a global refactor and preserves the AoS ergonomics for
 the majority of the codebase that is not on the hot path.
 """
+id = "5d14346b-e9a7-4932-ba94-b4d0b41c4e4c"
