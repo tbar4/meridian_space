@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge and the Mini-LSM course structure. Verify Petrov's specific SSTable format description and Kleppmann's LSM compaction cost analysis against the source texts.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The B+ tree from Module 2 provides O(log N) reads but suffers under write-heavy workloads: every insert modifies a leaf page in place, and node splits amplify writes further. For the Orbital Object Registry's burst ingestion scenario (8,000 new objects in 45 minutes), the B+ tree's write amplification of 10–20x is the bottleneck.

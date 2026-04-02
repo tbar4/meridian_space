@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. Verify Petrov's specific split/merge algorithm variants and his treatment of lazy vs. eager rebalancing against Chapters 4–5.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 A B-tree that only grows (inserts, never deletes) would eventually have every node at 100% capacity. The next insert into a full node would fail — unless the tree can restructure itself. **Node splitting** is the mechanism: when a node overflows, it divides into two half-full nodes and promotes a separator key to the parent. This maintains the B-tree invariant (all leaves at the same depth) and keeps every node between half and completely full.

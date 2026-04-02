@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. Verify Kleppmann's columnar processing analysis against Chapter 6. Additional references: MonetDB/X100 paper (Boncz et al., 2005), DuckDB architecture documentation.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The volcano model processes one row at a time. For the OOR's catalog merge — 500,000 rows from 5 sources, with comparison logic on 4 floating-point fields — the per-row function call overhead and cache inefficiency dominate CPU time. Vectorized execution addresses this by changing the unit of work from a single row to a **batch** (or vector) of rows.

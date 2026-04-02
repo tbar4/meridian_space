@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. Verify Petrov's join algorithm cost models and Kleppmann's distributed join discussion against the source chapters.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The OOR's catalog merge problem is fundamentally a **join**: match TLE records from 5 sources on NORAD catalog ID, then select the best TLE for each object (most recent epoch, highest source priority). In SQL terms: `SELECT * FROM source_a JOIN source_b ON a.norad_id = b.norad_id`.

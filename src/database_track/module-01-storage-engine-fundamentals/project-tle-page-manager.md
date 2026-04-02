@@ -16,7 +16,8 @@
 > The first deliverable in the OOR storage engine build is a **page manager** capable of reading and writing TLE records to a custom binary page format. This component sits at the bottom of the storage stack — every subsequent module builds on it. The page manager must demonstrate correct page layout, buffer pool caching, slotted page record management, and integrity verification via checksums.
 
 ---
-
+<!-- toc -->
+---
 ## Objective
 
 Build a `PageManager` that:

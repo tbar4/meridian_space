@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge and the Mini-LSM Week 3 MVCC chapters. Verify Petrov's MVCC version chain description and Kleppmann's snapshot isolation anomaly analysis.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 MVCC solves the fundamental problem of 2PL — writers blocking readers — by keeping multiple versions of each key. Instead of locking a key and making other transactions wait, the engine stores every version alongside a timestamp. Readers pick the version that matches their snapshot timestamp; writers create new versions without disturbing old ones. Readers never block writers. Writers never block readers. The only conflict is writer-writer on the same key.

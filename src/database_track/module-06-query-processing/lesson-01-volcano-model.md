@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. Verify Petrov's volcano model description and pipelining analysis against Chapter 14.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The B+ tree range scan iterator from Module 2 and the LSM merge iterator from Module 3 are both instances of a general pattern: **pull-based iteration**. A consumer calls `next()`, the producer returns the next item or signals completion. The volcano model (also called the iterator model, introduced by Goetz Graefe in 1990) generalizes this into a complete query execution framework.

@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. The following concepts would benefit from verification against the source books: Petrov's specific notation for B-tree order vs. branching factor, and his framing of the fill factor invariant.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 A heap file of slotted pages provides O(1) access by Record ID `(page_id, slot_id)`, but O(N) access by key — finding NORAD ID 25544 requires scanning every data page. For the Orbital Object Registry, this is the difference between a 0.05ms indexed lookup and a 5ms full scan. At 500 conjunction checks per second, indexed lookups consume 25ms of I/O per second. Full scans consume 2,500ms — the system spends more time scanning than computing.

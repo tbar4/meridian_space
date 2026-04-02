@@ -5,7 +5,8 @@
 **Estimated effort:** 6–8 hours
 
 ---
-
+<!-- toc -->
+---
 ## SDA Incident Report — OOR-2026-0047
 
 > **Classification:** ENGINEERING DIRECTIVE  

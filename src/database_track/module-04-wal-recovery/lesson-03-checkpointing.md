@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. Verify Petrov's fuzzy checkpoint algorithm and his WAL truncation semantics against Chapter 10.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 Without checkpointing, the WAL grows indefinitely. If the engine has been running for 24 hours with 100,000 TLE updates, the WAL contains 100,000 records — all of which must be scanned during recovery to find those with LSN > flushed_lsn. Recovery time grows linearly with WAL size. For a system that must return to service within seconds after a crash (the OOR's conjunction avoidance SLA requires <30s recovery), unbounded WAL growth is unacceptable.

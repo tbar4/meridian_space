@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. Verify the bloom filter bits-per-key formula and Petrov's block cache eviction policies against the source texts.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The LSM read path from Lesson 1 checks every SSTable from newest to oldest. For a database with 50 SSTables, a negative lookup (key doesn't exist) requires 50 SSTable probes — each involving reading an index block and potentially a data block from disk. Even with leveled compaction limiting the effective probe count to one SSTable per level, a 4-level LSM still reads 4 SSTables per negative lookup.

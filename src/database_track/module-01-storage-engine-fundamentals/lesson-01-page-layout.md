@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. The following concepts would benefit from verification against the source books: exact page header field sizes in Petrov Ch. 3, the magic byte conventions across SQLite/InnoDB/RocksDB, and Petrov's specific framing of the page abstraction layer.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 Every storage engine eventually answers the same question: how do bytes get from memory to disk and back? The answer is almost never "write them sequentially and hope for the best." Sequential writes are fast, but random reads against an unstructured file are catastrophic — seeking to an arbitrary byte offset in a 10GB file on a spinning disk costs 5–10ms per seek. Even on SSDs, random 512-byte reads are an order of magnitude slower than reading aligned 4KB blocks.

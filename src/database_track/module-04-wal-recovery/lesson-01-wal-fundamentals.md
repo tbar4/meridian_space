@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. Verify Petrov's WAL record format, LSN semantics, and `fsync` discussion against Chapters 9–10.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The LSM engine from Module 3 achieves high write throughput by buffering writes in a memtable and flushing them to SSTables in the background. But the memtable is volatile — it lives in process memory. If the process crashes, the OS kills the process, or power fails, the memtable's contents are lost. For the OOR, this means losing every TLE update since the last flush — potentially minutes of orbital data during an active pass window.

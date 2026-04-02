@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. Verify Petrov's 2PL description and deadlock detection algorithms against Chapter 12.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 Before MVCC became dominant, lock-based concurrency control was the standard approach to transaction isolation. **Two-Phase Locking (2PL)** is the classical protocol: transactions acquire locks before accessing data, and release them only after completing all operations. The "two phases" are the **growing phase** (acquiring locks) and the **shrinking phase** (releasing locks). A transaction never acquires a new lock after releasing any lock.
