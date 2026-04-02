@@ -1,0 +1,134 @@
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    // B+ tree: 4KB pages, 4-byte keys, 4-byte child pointers
+    let page_size: usize = 4096;
+    let header: usize = 20;
+    let key_size: usize = 4;
+    let ptr_size: usize = 4;
+
+    // Internal node: (ptr, key, ptr, key, ..., ptr)
+    // n keys need n+1 pointers: n*(key+ptr) + ptr <= usable
+    let usable = page_size - header;
+    let max_keys = (usable - ptr_size) / (key_size + ptr_size);
+    let branching = max_keys + 1;
+
+    println!("usable={} max_keys={} branching={}", usable, max_keys, branching);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "usable=4076 max_keys=509 branching=510"
+context = """
+The branching factor of a B-tree is determined by how many key-pointer pairs fit in one page.
+An internal node with n keys has n+1 child pointers. The layout is:
+[ptr_0][key_0][ptr_1][key_1]...[ptr_n-1][key_n-1][ptr_n]
+Total bytes: n * (key_size + ptr_size) + ptr_size = n * 8 + 4.
+Usable space: 4096 - 20 = 4076 bytes. Solving: n * 8 + 4 <= 4076 gives n <= 509.
+So max 509 keys and 510 children per node. This high branching factor is why B-trees
+are so effective for disk-based access — the tree is extremely shallow.
+"""
+id = "4cea1c51-e5bd-4c2e-92b5-265bd289eb4a"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    // B+ tree: 4KB pages, 4-byte keys, 4-byte child pointers
+    let page_size: usize = 4096;
+    let header: usize = 20;
+    let key_size: usize = 4;
+    let ptr_size: usize = 4;
+
+    // Internal node: (ptr, key, ptr, key, ..., ptr)
+    // n keys need n+1 pointers: n*(key+ptr) + ptr <= usable
+    let usable = page_size - header;
+    let max_keys = (usable - ptr_size) / (key_size + ptr_size);
+    let branching = max_keys + 1;
+
+    println!("usable={} max_keys={} branching={}", usable, max_keys, branching);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "usable=4076 max_keys=509 branching=510"
+context = """
+The branching factor of a B-tree is determined by how many key-pointer pairs fit in one page.
+An internal node with n keys has n+1 child pointers. The layout is:
+[ptr_0][key_0][ptr_1][key_1]...[ptr_n-1][key_n-1][ptr_n]
+Total bytes: n * (key_size + ptr_size) + ptr_size = n * 8 + 4.
+Usable space: 4096 - 20 = 4076 bytes. Solving: n * 8 + 4 <= 4076 → n <= 509.
+So max 509 keys and 510 children per node. This high branching factor is why B-trees
+are so effective for disk-based access — the tree is extremely shallow.
+"""
+id = "8068a21a-ee5e-47cd-81ef-5032bfa20f37"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR B-tree has branching factor 510 and indexes 100,000 NORAD IDs. The buffer pool has
+8 frames. During a pass window, conjunction queries issue 500 random point lookups per second.
+Which pages should be prioritized for buffer pool residency to minimize disk I/O?
+"""
+prompt.distractors = [
+  "The leaf pages that were accessed most recently, following standard LRU policy.",
+  "The data pages containing the TLE records, since they are the final destination of every lookup.",
+  "All pages should have equal priority — the buffer pool's eviction policy handles this automatically."
+]
+answer.answer = "The root page and first-level internal nodes — they are accessed by every lookup and collectively fit in a small number of frames, eliminating 1-2 page reads from every query."
+context = """
+With branching factor 510 and 100k records, the tree has ~2 levels. The root page is hit by every
+single lookup (500/sec). The ~200 leaf pages are each hit much less frequently. Keeping the root
+(and any first-level internal nodes) pinned in the buffer pool eliminates the most-repeated I/O.
+The remaining buffer pool frames can cache hot leaf pages using LRU. Data pages (TLE records) are
+accessed after the index lookup and benefit from caching, but the index upper levels have the
+highest access frequency. A manual pinning strategy for the root outperforms blind LRU here.
+"""
+id = "9e670637-f195-467e-aabb-f8e7345b45cf"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+An engineer uses `binary_search` instead of `partition_point` for the internal node child lookup.
+The B-tree initially works correctly. After a series of inserts trigger node splits, some lookups
+start returning incorrect results. What went wrong?
+"""
+prompt.distractors = [
+  "`binary_search` does not work on sorted arrays of integers.",
+  "`binary_search` is O(n) while `partition_point` is O(log n), causing timeouts.",
+  "Node splits always produce duplicate keys in internal nodes, and `binary_search` cannot handle duplicates at all."
+]
+answer.answer = "When a split promotes a separator key that already exists in the node, `binary_search` may return the wrong index — it picks an arbitrary match among duplicates, while `partition_point` consistently returns the correct insertion point."
+context = """
+`binary_search` returns `Ok(idx)` for any index where the key matches — with duplicates, the
+choice is arbitrary. The child-selection logic depends on finding the *first* separator greater
+than the search key, which is what `partition_point(|&k| k <= key)` provides. With unique keys
+this distinction doesn't matter, but splits can produce duplicate separators (the promoted key
+is a copy of a leaf key). The mismatch causes searches to follow the wrong child pointer,
+returning records from the wrong key range or missing records entirely. This is a real bug class
+in B-tree implementations.
+"""
+id = "789acbc0-f529-403f-8a2d-da220f0f549c"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR indexes 100,000 objects with a B+ tree (branching factor 510). An analyst needs to find
+all objects with NORAD IDs between 40000 and 40500. How does the B+ tree serve this range query
+compared to a hash index?
+"""
+prompt.distractors = [
+  "Both perform identically — a range query is just 500 consecutive point lookups.",
+  "The hash index is faster because it can compute the hash of each ID in O(1).",
+  "Neither can serve range queries efficiently — a full table scan is required."
+]
+answer.answer = "The B+ tree locates NORAD ID 40000 in O(log N) page reads, then scans sequentially through sorted leaf nodes until 40500. The hash index cannot do this — keys are scattered by the hash function, requiring 500 separate lookups."
+context = """
+Range scan efficiency is the primary advantage of ordered tree indices over hash indices. The B+
+tree's leaf nodes are sorted by key and (in B+ trees) linked together. Once the starting key is
+found, the scan follows the leaf chain with sequential page reads — no further tree traversals.
+For 500 keys across ~10 leaf pages, this is ~12 page reads total (2 for the tree traversal + 10
+for the leaf chain). A hash index distributes keys uniformly across buckets with no ordering —
+each of the 500 lookups is independent, requiring up to 500 separate bucket reads. Hash indices
+excel at point lookups but are fundamentally unable to serve range queries efficiently.
+"""
+id = "8c250d86-dc16-4e30-950e-1745c1e79c3a"

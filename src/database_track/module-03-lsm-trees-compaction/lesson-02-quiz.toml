@@ -1,0 +1,121 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR LSM engine uses leveled compaction with size_ratio=10 and base_level_size=64MB. The
+engine has 3 levels (L1=64MB, L2=640MB, L3=6.4GB). A single 4MB SST is compacted from L1 to
+L2. In the worst case, how much data is rewritten during this one compaction?
+"""
+prompt.distractors = [
+  "4MB — only the L1 SST is rewritten.",
+  "64MB — the entire L1 level is rewritten.",
+  "644MB — all of L1 and L2 are rewritten together."
+]
+answer.answer = "Up to ~44MB — the 4MB L1 SST plus all overlapping L2 SSTs. With size_ratio=10, the overlapping L2 region is ~40MB (the L1 SST's key range covers ~1/16th of L2's 640MB)."
+context = """
+In leveled compaction, one L1 SST is merged with all L2 SSTs whose key ranges overlap. If L1
+has 16 SSTs of 4MB each (64MB total), each SST covers ~1/16th of the key space. L2 is 640MB,
+so the overlapping portion is ~640/16 = 40MB. Total rewrite: 4MB (L1 input) + 40MB (L2
+overlapping) = 44MB. This is the write amplification cost: to compact 4MB of new data, the
+engine rewrites ~44MB total — an 11x write amplification for this single compaction. Over the
+data's full lifetime across all levels, total write amplification is O(size_ratio * num_levels).
+"""
+id = "da928369-9457-44a1-86fe-290acaf146bd"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+During compaction, the merge iterator encounters key 25544 in three SSTs: SST_5 (newest,
+value=TLE_v3), SST_3 (value=TLE_v2), and SST_1 (oldest, value=TLE_v1). The compaction is
+writing to L2 (not the bottom level). What does the output contain for key 25544?
+"""
+prompt.distractors = [
+  "All three versions — the engine preserves history until garbage collection.",
+  "TLE_v1 — the oldest version is the authoritative one.",
+  "Nothing — multiple versions mean the key is in conflict and should be dropped."
+]
+answer.answer = "Only TLE_v3 (the newest version). Older versions are shadowed and dropped during the merge. The newest SST always wins."
+context = """
+The merge iterator's Ord implementation ensures the newest SST's entry takes priority for equal
+keys. Older versions (v2, v1) are consumed from the heap and discarded. The output SST contains
+only the latest version of each key. This is safe because any read that would have found v2 or v1
+will now find v3 in the compaction output (which is at a lower level, checked later in the read
+path). If the newest entry were a tombstone instead of v3, it would be preserved in the output
+(since this is not the bottom level) to continue shadowing any even older copies below.
+"""
+id = "0461ee80-2add-446f-86f6-a12ce83b9e6b"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+An OOR engineer switches from leveled to tiered compaction to improve write throughput during
+fragmentation events. Conjunction query latency increases from 2ms to 15ms. What is the most
+likely cause?
+"""
+prompt.distractors = [
+  "Tiered compaction produces larger SST files that are slower to read.",
+  "Tiered compaction disables bloom filters.",
+  "Tiered compaction uses more CPU for merge-sorting."
+]
+answer.answer = "Tiered compaction maintains multiple sorted runs per tier, so point lookups must check more SSTs. The read amplification increase (more files to probe) directly increases query latency."
+context = """
+Leveled compaction maintains one sorted run per level — at most one SST per level is checked
+for a point lookup. Tiered compaction allows multiple sorted runs per tier, so a lookup may need
+to check several runs per tier. With 4 tiers and 4 runs per tier, that is up to 16 SST probes
+vs. 4 for leveled. Even with bloom filters (which skip most probes), the higher total file count
+increases the expected number of actual reads. The tradeoff is intentional: tiered reduces write
+amplification at the cost of read amplification.
+"""
+id = "1bf91571-8384-492e-a9ca-3ec1d72fb13e"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    // Leveled compaction: size_ratio=10, base=64MB
+    let size_ratio: u64 = 10;
+    let base_mb: u64 = 64;
+
+    let l1 = base_mb;
+    let l2 = l1 * size_ratio;
+    let l3 = l2 * size_ratio;
+    let total = l1 + l2 + l3;
+
+    // Write amplification per level transition
+    let wa_per_level = size_ratio + 1; // rewrite ratio + self
+    let total_wa = wa_per_level * 3; // 3 level transitions (L0→L1, L1→L2, L2→L3)
+
+    println!("total_mb={} wa={}", total, total_wa);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "total_mb=7104 wa=33"
+context = """
+L1=64MB, L2=640MB, L3=6400MB. Total capacity: 7104MB (~7GB). Write amplification per level
+transition is (size_ratio + 1) = 11 — each byte at level L is rewritten ~11 times to merge
+with the 10x larger level below. Over 3 transitions: 11 * 3 = 33x total write amplification.
+This means 1MB of user writes results in ~33MB of disk writes over the data's lifetime. This
+is the cost of maintaining sorted runs at each level.
+"""
+id = "701f28c1-5fdd-4280-8403-4ebdb92b57b3"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+A tombstone for NORAD ID 99999 exists in L1. The original record for 99999 is in L3. During L1→L2
+compaction, should the tombstone be included in the L2 output?
+"""
+prompt.distractors = [
+  "No — tombstones are always dropped during compaction to save space.",
+  "No — the tombstone has already served its purpose by shadowing the L1 version.",
+  "Yes, but only if a bloom filter confirms the key exists in L3."
+]
+answer.answer = "Yes — the tombstone must be preserved because the original record in L3 still exists. Dropping the tombstone would make the L3 record visible again, resurrecting the deleted key."
+context = """
+Tombstones can only be safely dropped during compaction to the bottom level (the level with no
+SSTs below it). At any other level, dropping a tombstone would allow an older version of the key
+in a lower level to become visible. This is true regardless of whether the engine knows the key
+exists below — the safe default is to preserve. The mini-lsm course emphasizes this as a common
+correctness bug: eagerly dropping tombstones causes data resurrection. In production engines, a
+'watermark' or snapshot tracking mechanism determines when tombstones are safe to collect.
+"""
+id = "36669930-845d-4d63-b0ee-1fa493cdd0a0"

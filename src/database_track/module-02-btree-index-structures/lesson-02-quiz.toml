@@ -1,0 +1,122 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+A B+ tree with branching factor 510 indexes 50,000 NORAD IDs. During a fragmentation event,
+8,000 new objects are cataloged in rapid succession. What is the maximum number of page writes
+caused by a single insert if the tree has height 2?
+"""
+prompt.distractors = [
+  "1 — only the leaf page is modified.",
+  "2 — the leaf is modified and the parent is updated with the new record count.",
+  "510 — every child pointer in the root must be updated."
+]
+answer.answer = "5 — a split cascade from leaf to root: 2 pages for the leaf split (old + new), 2 pages for the root split (old + new), and 1 page for the new root."
+context = """
+Worst case at height 2: the leaf is full → split into 2 pages, promote key to root.
+The root is also full → split into 2 pages, create a new root → 1 page.
+Total: 2 (leaf split) + 2 (root split) + 1 (new root) = 5 page writes.
+The formula is 2h + 1 where h is the height. For h=2: 2(2) + 1 = 5.
+This worst case occurs when every node along the path from leaf to root is exactly full.
+In practice, this is extremely rare because splits leave nodes half-full.
+"""
+id = "6e17da7b-7e86-44c0-a534-d0c6fcbf1065"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+After bulk-loading 100,000 TLE records into an initially empty B+ tree, the average fill factor
+of leaf nodes is 100%. The engineer then deletes 60,000 records (atmospheric re-entries).
+With eager rebalancing (immediate merge on underflow), approximately what fill factor do the
+remaining leaf nodes have?
+"""
+prompt.distractors = [
+  "40% — proportional to the fraction of records remaining.",
+  "100% — merges compact all remaining records into the minimum number of fully-packed nodes.",
+  "33% — each merge creates a node that is one-third full on average."
+]
+answer.answer = "Between 50% and 100% — the B-tree invariant guarantees every node is at least half full, and merges produce nodes close to the minimum. The exact fill depends on deletion order and merge boundaries."
+context = """
+The B-tree invariant guarantees a minimum fill factor of 50% (⌈m/2⌉ keys per node). Merges
+produce nodes that are the sum of two below-minimum nodes minus the separator, which is typically
+between 50% and 75% full. The result after 60% deletion is NOT proportional (40% fill) because
+merges consolidate sparse nodes. It's also not 100% because merges don't rewrite the entire tree —
+they only combine adjacent siblings. The exact fill factor depends on which specific keys were
+deleted and whether they triggered merges or redistributions.
+"""
+id = "ba3dde7a-0fbc-4923-bc28-60ec5b6168c2"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+An engineer implements B-tree deletion with lazy rebalancing: deleted entries are marked with a
+tombstone but nodes are never merged. After months of operation with mixed inserts and deletes,
+the tree has grown to 3x the size it should be for the current record count. What is the
+operational consequence?
+"""
+prompt.distractors = [
+  "Point lookups become O(N) because tombstones must be scanned.",
+  "The buffer pool cannot cache the tree because it has too many pages.",
+  "New inserts will fail because the tree has reached its maximum height."
+]
+answer.answer = "Range scans slow down proportionally — scanning 3x as many leaf pages to retrieve the same number of live records. Point lookups are largely unaffected because the tree height doesn't change."
+context = """
+Lazy deletion doesn't increase tree height — tombstones occupy existing nodes without adding levels.
+Point lookups still traverse O(log N) pages; the constant factor increases slightly because nodes
+have lower effective density, but height is unchanged. Range scans are the primary victim: the
+scan must visit 3x as many leaf pages because each page has ~67% dead entries. The scan reads
+the same number of live records but does 3x the I/O. Buffer pool pressure increases but doesn't
+cause failure. Inserts succeed because tombstoned slots can be reused. The fix is periodic
+compaction (like PostgreSQL's VACUUM) to reclaim space.
+"""
+id = "d551eef1-932e-40df-b046-7e76e6eff31e"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    let branching: u32 = 510;
+    let max_keys = branching - 1; // 509
+    let min_keys = (branching + 1) / 2 - 1; // ceil(510/2) - 1
+
+    // After a split, both nodes get half the keys
+    let keys_after_split = max_keys / 2;
+
+    println!("min={} split={}", min_keys, keys_after_split);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "min=254 split=254"
+context = """
+The minimum key count per internal node is ceil(m/2) - 1 = ceil(510/2) - 1 = 255 - 1 = 254.
+After splitting a full node (509 keys), each half gets 509/2 = 254 keys (integer division).
+The median key is promoted to the parent. So a split produces two nodes each with exactly the
+minimum number of keys — one more deletion from either node would trigger a merge. This shows
+why bulk inserts followed by scattered deletes can cause a cascade of merges: splits leave
+nodes right at the boundary.
+"""
+id = "6e8f3857-354b-4d94-bbef-071a90931246"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+During a fragmentation event, the OOR must catalog 10,000 new objects. The engineer has two
+strategies: (A) insert objects one at a time in random NORAD ID order, or (B) sort the objects
+by NORAD ID and bulk-load them. Which approach produces a more space-efficient B-tree and why?
+"""
+prompt.distractors = [
+  "Random order is more efficient because it distributes inserts across many leaf nodes, avoiding splits.",
+  "Both produce identical trees because the B-tree invariants guarantee the same structure regardless of insertion order.",
+  "Random order is better because sorted inserts cause all splits to happen on the rightmost leaf, creating an unbalanced tree."
+]
+answer.answer = "Bulk-loading sorted data is more efficient — it fills each leaf node to near 100% capacity before moving to the next, minimizing the total number of nodes. Random inserts cause splits at ~50% fill, producing roughly 2x as many leaf nodes."
+context = """
+Sorted bulk-loading writes records sequentially into leaf pages, filling each one completely
+before starting the next. This produces leaf nodes at ~100% fill factor. Random inserts trigger
+splits when nodes are full, producing two ~50% full nodes — the tree ends up with roughly twice
+as many leaf pages as bulk-load would produce. The B-tree is still balanced in both cases (all
+leaves at the same depth), but the random-insert tree has lower space efficiency and more pages
+to scan. Many database systems provide a BULK LOAD or CREATE INDEX operation specifically to
+exploit sorted-insert efficiency. B-trees do not become unbalanced from sorted inserts — they
+grow by splitting the rightmost leaf and propagating upward, maintaining equal depth.
+"""
+id = "f13c8ad1-1e27-45d5-aa01-eca215f3497a"

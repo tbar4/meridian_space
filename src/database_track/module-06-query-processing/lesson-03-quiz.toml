@@ -1,0 +1,119 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR receives TLE data from 5 sources, each containing 100,000 records sorted by NORAD ID.
+The engineer needs to merge all 5 sources, matching on NORAD ID. Which join strategy minimizes
+total I/O and CPU for this specific workload?
+"""
+prompt.distractors = [
+  "Hash join — build a hash table on one source and probe with the other four sequentially.",
+  "Nested-loop join — the simplest implementation with the fewest code paths.",
+  "No join needed — concatenate all sources and sort the combined output."
+]
+answer.answer = "Multi-way sort-merge — all 5 sources are already sorted by NORAD ID, so the sort phase is free. A 5-way merge with a min-heap produces the joined result in a single linear pass: O(5 × 100,000)."
+context = """
+The key insight is that inputs are PRE-SORTED. Sort-merge join's cost is O(A+B) when inputs are
+sorted, compared to hash join's O(A+B) with additional O(min(A,B)) memory for the hash table.
+For 5 pre-sorted sources, a multi-way merge (using a min-heap of size 5) processes all 500,000
+records in one pass with O(5) memory overhead. Hash join would require building a hash table for
+one source and probing it 4 times — more memory and more passes. Concatenating and re-sorting
+is O(N log N) — worse than the linear merge. The multi-way merge is exactly the LSM merge
+iterator pattern from Module 3, repurposed for query processing.
+"""
+id = "b693d093-d1be-4a71-800f-e00005882042"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+A hash join builds a hash table on source_a (100,000 TLE records, ~100 bytes each) and probes
+with source_b. How much memory does the hash table require, approximately?
+"""
+prompt.distractors = [
+  "100 bytes — only one row is in memory at a time.",
+  "100 GB — hash tables have 1000x overhead.",
+  "100 MB — hash table overhead is approximately 10x the data size."
+]
+answer.answer = "Approximately 15–20MB. The raw data is 10MB (100k × 100 bytes). Hash table overhead (bucket pointers, linked list nodes, load factor headroom) adds 50–100% → ~15–20MB total."
+context = """
+The hash table stores all 100,000 rows from the build side. Raw data: 100k × 100B = 10MB.
+HashMap overhead in Rust: each entry has a hash (8 bytes), key storage, and bucket management.
+With a load factor of 0.75, the table allocates ~133k buckets. Total overhead is typically 50-100%
+of the raw data. Final estimate: 15-20MB. This is trivially small — the hash table easily fits in
+memory for the OOR's workload. Hash join memory only becomes a problem for build sides exceeding
+available RAM (hundreds of millions of rows), which requires partitioned/grace hash join.
+"""
+id = "9c7c5538-b84e-4d80-82dc-46e4c14796be"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    // Cost comparison for 100k × 100k join
+    let n: u64 = 100_000;
+
+    let nested_loop = n * n;
+    let hash_join = n + n; // build + probe
+    let sort_merge_presorted = n + n; // merge only (pre-sorted)
+    let sort_merge_unsorted = n * 16 + n * 16 + n + n; // sort both + merge (log2(100k)≈17)
+
+    println!("nl={} hj={} sm_pre={} sm_unsort={}",
+        nested_loop, hash_join, sort_merge_presorted, sort_merge_unsorted);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "nl=10000000000 hj=200000 sm_pre=200000 sm_unsort=3400000"
+context = """
+Nested-loop: 100k × 100k = 10 billion operations — completely impractical. Hash join: 100k build
++ 100k probe = 200k operations. Sort-merge (pre-sorted): 100k + 100k merge = 200k operations.
+Sort-merge (unsorted): 100k × 16 (sort A) + 100k × 16 (sort B) + 200k (merge) = 3.4M operations.
+When inputs are pre-sorted (as in the OOR's TLE sources), sort-merge equals hash join in cost.
+When inputs are unsorted, hash join wins (200k vs 3.4M). Nested-loop is 50,000x worse than
+hash join — this is why the ad-hoc catalog merge code took 45 seconds.
+"""
+id = "5dabf64c-b669-47bb-9ca6-19b1e144e310"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR needs to find all TLE records where `source_a.epoch > source_b.epoch` (a non-equi join
+condition). Which join algorithm can handle this efficiently?
+"""
+prompt.distractors = [
+  "Hash join — hash on the epoch column and compare.",
+  "Sort-merge join — sort by epoch and merge.",
+  "Any algorithm works equally well for non-equi joins."
+]
+answer.answer = "Only nested-loop join handles arbitrary non-equi conditions directly. Hash join requires equality on the hash key. Sort-merge join requires a sortable join condition. For `>` comparisons, nested-loop (or band join optimization) is needed."
+context = """
+Hash join is fundamentally an equi-join algorithm: it hashes the join key and matches on equality.
+A `>` condition cannot be expressed as a hash lookup. Sort-merge join can handle range conditions
+(sort both sides by epoch, then use a modified merge that matches ranges), but the standard
+implementation assumes equality. Nested-loop join can evaluate any arbitrary predicate — it checks
+every pair. For the OOR's epoch comparison, a band join (sort by epoch, then for each row scan
+a bounded window of the other side) would be more efficient than pure nested-loop. But the
+general answer is: non-equi joins are harder, and nested-loop is the fallback.
+"""
+id = "95f47ca0-ef83-41c1-80b2-adb04d3b1c5f"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+A query plan joins 5 sources using 4 sequential hash joins: (((A ⋈ B) ⋈ C) ⋈ D) ⋈ E. Each
+source has 100,000 rows. The intermediate results grow because the join adds columns. By the
+4th join, intermediate rows are 500 bytes each. What is the memory concern?
+"""
+prompt.distractors = [
+  "No concern — hash join memory is bounded by the build side, which is always 100k rows.",
+  "The 4th join's build-side hash table is 100k × 500 bytes = 50MB — small enough.",
+  "The probe side of the 4th join is 10 billion rows due to the cross product."
+]
+answer.answer = "The intermediate result from the 3rd join (used as probe side for the 4th) may contain more than 100k rows if the join is not 1:1. If NORAD IDs are unique per source (1:1 join), intermediate sizes stay at 100k rows — manageable. But if duplicates exist, intermediate growth is the concern."
+context = """
+For the OOR's specific workload, NORAD IDs are unique within each source (1:1 join), so
+intermediate results stay at ~100k rows throughout. The row width grows (adding columns from each
+source), but 100k × 500B = 50MB is manageable. However, if the join were many-to-many (e.g.,
+matching on a non-unique field like inclination band), the intermediate result could explode
+exponentially. The multi-way sort-merge approach avoids intermediate materialization entirely by
+processing all sources simultaneously in a single pass — another advantage for the OOR's use case.
+"""
+id = "31de3f0c-4a0d-4b58-945c-a4456ef2b958"

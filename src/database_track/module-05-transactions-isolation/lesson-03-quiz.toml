@@ -1,0 +1,120 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+Key "NORAD-25544" has versions at timestamps 50, 80, and 110. A conjunction query with
+read_ts=95 and a TLE update with write_ts=110 are both active. Under MVCC snapshot isolation,
+which version does the conjunction query read?
+"""
+prompt.distractors = [
+  "Version at ts=110 — the most recent committed version.",
+  "Version at ts=50 — the oldest version for safety.",
+  "No version — the key is locked by the concurrent write."
+]
+answer.answer = "Version at ts=80 — the newest version with commit_ts ≤ read_ts (95). The ts=110 version is invisible because it was committed after the query's snapshot."
+context = """
+Snapshot isolation: the query sees data as of ts=95. Versions at ts=50 and ts=80 are both
+visible (≤ 95). The newest visible version is ts=80. The ts=110 version was committed after
+the snapshot and is invisible to this transaction. The key is NOT locked — MVCC provides
+non-blocking reads. The write at ts=110 proceeded without waiting for the query to finish.
+This is the core MVCC advantage: the conjunction query gets a consistent answer without
+interfering with concurrent writes.
+"""
+id = "2cc38b40-bbdb-4f24-9766-a5cc317959fa"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The MVCC garbage collector runs with watermark=100. Key "NORAD-43013" has versions at
+timestamps 30, 70, 90, and 120. Which versions can be garbage-collected?
+"""
+prompt.distractors = [
+  "Versions at ts=30 and ts=70 — both are below the watermark.",
+  "All versions below ts=100 (ts=30, ts=70, ts=90).",
+  "No versions — garbage collection only runs during compaction."
+]
+answer.answer = "Only ts=30. Version ts=70 must be retained as the 'floor version' for transactions at the watermark (read_ts=100 might need ts=70 if ts=90 is a tombstone). Version ts=90 is above the watermark."
+context = """
+Watermark=100 means no transaction has read_ts < 100. For a transaction at read_ts=100, the
+visible version is the newest with ts ≤ 100, which is ts=90. For the GC to safely remove ts=30
+and ts=70, it must confirm that ts=90 is a non-tombstone value. If ts=90 is a tombstone, then
+a transaction at read_ts=100 needs to see that tombstone (to know the key is deleted). The version
+below it (ts=70) is only needed if ts=90 doesn't exist — but since ts=90 does exist, ts=70 is
+only needed as a safety margin. The safe rule: keep the newest version ≤ watermark (ts=90) and
+one version below it (ts=70), garbage-collect everything older (ts=30). Ts=120 is above watermark.
+"""
+id = "30c1c5d4-6aaf-4a99-9c35-52b4ee559bc2"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    // Simulate MVCC key encoding with inverted timestamps
+    let ts_a: u64 = 100;
+    let ts_b: u64 = 200;
+
+    let encoded_a = !ts_a;  // Invert
+    let encoded_b = !ts_b;
+
+    // In byte order, smaller encoded value sorts first
+    let newer_sorts_first = encoded_b < encoded_a;
+    println!("enc_a={} enc_b={} newer_first={}", encoded_a, encoded_b, newer_sorts_first);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "enc_a=18446744073709551515 enc_b=18446744073709551415 newer_first=true"
+context = """
+Inverting timestamps: !100 = 18446744073709551515, !200 = 18446744073709551415. Since 200 > 100,
+!200 < !100 (inversion reverses the order). In ascending byte order, the key with ts=200 (encoded
+as a smaller number) sorts before ts=100. This means the LSM's default ascending scan encounters
+the newest version first — exactly what snapshot reads need. The encoding avoids a reverse scan
+or separate version index. This is the same technique used by Mini-LSM and RocksDB's internal
+key format.
+"""
+id = "6d7dca83-2f63-4b77-b814-04f373d88197"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+Two concurrent transactions both write to key "NORAD-25544". Transaction A has read_ts=100 and
+attempts to commit with write_ts=105. Transaction B has read_ts=102 and already committed with
+write_ts=104. Under MVCC with write conflict detection, what happens to Transaction A?
+"""
+prompt.distractors = [
+  "Transaction A commits successfully at ts=105, creating a second version alongside B's ts=104 version.",
+  "Transaction A's version replaces B's version because ts=105 > ts=104.",
+  "Both transactions are aborted and must retry."
+]
+answer.answer = "Transaction A is aborted due to a write-write conflict. B committed a version at ts=104, which is after A's read_ts (100). A's write to the same key would be based on a stale snapshot."
+context = """
+Write conflict detection: at commit time, Transaction A checks whether any version of 'NORAD-25544'
+has been committed with ts > A's read_ts (100). Transaction B committed at ts=104 > 100, so a
+conflict exists. A is aborted because its write is based on a snapshot that doesn't include B's
+update — A might have made its decision based on the old value, which B has since changed.
+A must retry with a fresh read_ts. This is optimistic concurrency control: conflicts are detected
+at commit time, not prevented by locks. The cost is the occasional retry.
+"""
+id = "0b36794d-cd2e-4dc2-b6b0-3a1228baa160"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR's MVCC engine has a long-running analytics query with read_ts=50 that has been running
+for 2 hours. The current write timestamp is 10,000. What is the operational consequence of this
+long-running transaction?
+"""
+prompt.distractors = [
+  "The analytics query blocks all writes with ts > 50.",
+  "The analytics query returns increasingly stale results, which may be incorrect.",
+  "No consequence — MVCC handles this transparently."
+]
+answer.answer = "The watermark is stuck at 50, preventing garbage collection of all versions between ts=50 and ts=10,000. Old versions accumulate, increasing space amplification and read amplification (more versions to scan per key)."
+context = """
+The watermark is the minimum read_ts of all active transactions. With the analytics query at
+read_ts=50, the watermark cannot advance past 50. No version with ts > 50 can be garbage-collected
+because the analytics query might read it. After 2 hours and ~10,000 writes, old versions
+accumulate for every key that has been updated. This causes: (1) increased disk usage, (2) slower
+reads (more versions to skip per key), (3) compaction cannot reclaim space effectively. The fix:
+set a maximum transaction duration and abort long-running queries, or use a separate read replica
+for analytics. MVCC does NOT block writes — but it prevents cleanup.
+"""
+id = "5d1515b2-e27a-4527-bc1b-c91c62f05c8f"

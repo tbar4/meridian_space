@@ -1,0 +1,123 @@
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR slotted page has 3 live records and 2 tombstoned slots. Total free space is 800 bytes
+(counting both the contiguous gap and the space occupied by deleted records). An engineer tries
+to insert a 600-byte record and the insert fails. After calling `compact()`, the same insert
+succeeds. What was the state before compaction?
+"""
+prompt.distractors = [
+  "The contiguous free space was 800 bytes but the slot directory had no room for a new entry.",
+  "The compaction reduced record sizes by removing padding, freeing additional space.",
+  "The tombstoned slots were blocking the slot directory from growing."
+]
+answer.answer = "The 800 bytes of free space were split into non-contiguous fragments (e.g., 300 bytes from one deleted record and 500 bytes from another). No single fragment was large enough for the 600-byte record. Compaction merged them into one 800-byte block."
+context = """
+Fragmentation is the classic slotted page problem. Total free space can be sufficient (800 ≥ 604,
+counting the 4-byte slot entry), but if no single contiguous block is large enough, the insert
+fails. Compaction slides all live records together, merging the fragments. After compaction, the
+free space is one contiguous block of 800 bytes, and the 600+4 = 604 byte insert succeeds.
+Tombstoned slots don't block directory growth — the directory can reuse tombstoned entries.
+Compaction does not change record sizes.
+"""
+id = "d7aa66a0-5976-4f51-a10b-c6d788e6b38a"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+A B-tree index stores leaf-node pointers as `(page_id=42, slot_id=3)`. A background compaction
+thread runs `compact()` on page 42, moving the record from byte offset 3800 to byte offset 3900.
+Does the B-tree index need to be updated?
+"""
+prompt.distractors = [
+  "Yes — the B-tree must update the pointer to reflect the new byte offset.",
+  "Yes — compaction changes the slot ID, so the B-tree must re-index the record.",
+  "No — but only because compaction also updates the B-tree's internal pointer table."
+]
+answer.answer = "No — the B-tree references `slot_id=3`, not the byte offset. Compaction updates the slot directory entry for slot 3 to point to offset 3900, so the RID `(42, 3)` still resolves correctly."
+context = """
+This is the fundamental value of the slotted page indirection. External references use (page_id,
+slot_id), and the slot directory maps slot_id to the current byte offset. Compaction changes
+offsets but not slot IDs. The B-tree, the WAL, and the MVCC version chain all reference records
+by RID — none of them need to be updated when records move within a page. This property is what
+makes in-page compaction safe to run concurrently with reads (with appropriate locking).
+"""
+id = "736d98db-8d0a-4ee3-9ab8-1b8f1fa1a9a4"
+
+[[questions]]
+type = "Tracing"
+prompt.program = """
+fn main() {
+    let page_size: usize = 4096;
+    let header_size: usize = 17;
+    let slot_size: usize = 4;
+
+    // 3 records: 100, 200, 150 bytes
+    let records = [100usize, 200, 150];
+    let num_slots = records.len();
+
+    let slot_dir_end = header_size + num_slots * slot_size;
+    let total_record_bytes: usize = records.iter().sum();
+    let record_region_start = page_size - total_record_bytes;
+    let free_space = record_region_start - slot_dir_end;
+
+    println!("slots={} free={}", slot_dir_end, free_space);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "slots=29 free=3617"
+context = """
+Slot directory occupies 17 + (3 * 4) = 29 bytes from the start of the page. Records occupy
+100 + 200 + 150 = 450 bytes from the end, so the record region starts at 4096 - 450 = 3646.
+Free space is the gap between them: 3646 - 29 = 3617 bytes. This demonstrates the 'grow toward
+each other' layout — the slot directory and records share the same pool of free space, which
+maximizes utilization compared to fixed partitioning.
+"""
+id = "57a118e3-6a45-4615-8a8e-009d75a203aa"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+An engineer proposes removing tombstoned slots during compaction to shrink the slot directory.
+This would reclaim 4 bytes per deleted record. After compaction, slot IDs would be reassigned
+sequentially (0, 1, 2, ...) with no gaps. What is the critical problem with this approach?
+"""
+prompt.distractors = [
+  "The slot directory cannot shrink because its size is encoded in the page header at creation time.",
+  "Removing slots would require updating the page checksum, which is too expensive during compaction.",
+  "Reassigning slot IDs would cause the free space pointer to point to invalid offsets."
+]
+answer.answer = "Every external reference that uses the old slot IDs — B-tree leaf pointers, index entries, WAL log records, MVCC version chains — would now point to the wrong record or a nonexistent slot."
+context = """
+Slot ID stability is the whole point of the slotted page design. A record at slot 5 must always
+be reachable as slot 5, regardless of what happens to other slots. If you remove tombstoned
+slot 2 and renumber slot 5 to slot 4, every B-tree entry, every WAL redo record, and every
+MVCC version pointer that references (page_id, 5) now refers to the wrong record. This would
+require a global scan-and-update of every structure that stores RIDs — effectively a full
+database rebuild. The 4 bytes per tombstone are not worth the correctness risk. Production
+engines never compact the slot directory.
+"""
+id = "ee15970b-1143-482c-a2b5-9e69f1b88c90"
+
+[[questions]]
+type = "MultipleChoice"
+prompt.prompt = """
+The OOR team is deciding on a maximum record size for TLE data. The page size is 4KB (4,096 bytes),
+the header is 17 bytes, and each record needs at least one slot entry (4 bytes). What is the
+maximum single-record size that fits in one page without needing overflow pages?
+"""
+prompt.distractors = [
+  "4,096 bytes — the record can fill the entire page.",
+  "4,079 bytes — the page size minus the header.",
+  "4,096 - 17 - 4 - 2 = 4,073 bytes, accounting for header, slot, and a 2-byte alignment pad."
+]
+answer.answer = "4,096 - 17 - 4 = 4,075 bytes — the page size minus the header and one slot directory entry."
+context = """
+The usable space for a single record is the page size minus all fixed overhead: the 17-byte
+header and the 4-byte slot directory entry for this record. That gives 4,096 - 17 - 4 = 4,075
+bytes. There is no alignment padding in this design (records are byte-addressed, not word-aligned).
+A record larger than 4,075 bytes would require an overflow page. For TLE records at ~140 bytes,
+this limit is never reached — but the engine should enforce it and route oversized records to
+overflow chains for forward compatibility.
+"""
+id = "38f9a954-02a5-4bef-b7af-324049c46fdb"
