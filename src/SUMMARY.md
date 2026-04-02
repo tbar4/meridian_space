@@ -31,7 +31,7 @@
   - [Cache Friendly Data Layouts](./foundation_track/module05_data_oriented_programming/cache_friendly_data_layouts.md)
   - [SOA vs SOS](./foundation_track/module05_data_oriented_programming/soa_vs_sos.md)
   - [Arena Allocation](./foundation_track/module05_data_oriented_programming/arena_allocation.md)
-  - [Project: Telemetry Processor](./module05_data_oriented_programming/project_telemetry_processor.md)
+  - [Project: Telemetry Processor](./foundation_track/module05_data_oriented_programming/project_telemetry_processor.md)
 ---
 - [Module 6: Performance & Profiling](./foundation_track/module06_performance_and_profiling/README.md)
   - [Benchmarking](./foundation_track/module06_performance_and_profiling/benchmarking.md)
