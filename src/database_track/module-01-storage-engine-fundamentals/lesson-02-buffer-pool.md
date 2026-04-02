@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. The following concepts would benefit from verification against the source books: Petrov's specific CLOCK algorithm variant, his framing of the buffer pool vs. OS page cache tradeoff, and the exact dirty page flush protocols described in Chapter 5.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The page I/O layer from Lesson 1 reads and writes pages directly to disk. Every `read_page` call triggers a system call, a disk seek (on HDD) or a flash translation layer lookup (on SSD), and a DMA transfer. For the Orbital Object Registry's conjunction query workload — which repeatedly accesses the same hot set of TLE records during a pass window — going to disk for every page request is unacceptable. A conjunction check against 100 objects would issue 100+ page reads, taking 50–100ms on SSD and over a second on spinning disk.

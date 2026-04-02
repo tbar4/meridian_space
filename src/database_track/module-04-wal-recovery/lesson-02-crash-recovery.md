@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. Verify Petrov's ARIES protocol adaptation for LSM engines against Chapter 10.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The WAL ensures every committed operation is recorded on durable storage. After a crash, the engine must use that log to return to a consistent state. This is the job of the **crash recovery** protocol — a deterministic procedure that reads the WAL, determines what was lost, and reconstructs the in-memory state.

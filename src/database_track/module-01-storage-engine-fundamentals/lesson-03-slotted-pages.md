@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. The following concepts would benefit from verification against the source books: Petrov's specific slotted page layout, his terminology for the slot directory vs. cell pointer array, and the compaction algorithm described in Chapter 3.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The page format from Lesson 1 stores records at fixed offsets. This works for fixed-size records — and if every TLE record were exactly 140 bytes, that would be sufficient. But real TLE data is messier: newer objects have additional metadata fields (drag coefficients, maneuver flags, covariance matrices), older legacy records omit optional fields, and record sizes will grow as ESA adds new conjunction assessment data. A format that requires all records to be the same size either wastes space (padding every record to the maximum) or breaks when schema evolves.

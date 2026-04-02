@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. Verify Petrov's treatment of B+ tree leaf linking, his comparison of B-tree vs. B+ tree I/O cost for range scans, and his coverage of prefix compression in Chapter 6.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The B-tree from Lessons 1 and 2 stores key-value pairs in both internal and leaf nodes. This is correct and complete for point lookups, but it has a significant limitation for range scans: the data is distributed across all levels of the tree. Scanning NORAD IDs 40000–40500 requires traversing internal nodes to find the start, then potentially bouncing between internal and leaf nodes to collect all matching records.

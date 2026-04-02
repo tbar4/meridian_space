@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge. Verify Kleppmann's isolation level taxonomy and anomaly definitions against Chapter 7.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 The OOR's LSM engine from Modules 3–4 provides durable, crash-recoverable storage for TLE records. But it offers no guarantees about what happens when multiple operations execute concurrently. A conjunction query reading NORAD 43013's TLE while a bulk update is overwriting it can see a partially-updated record — or a mix of old and new versions across different objects. The result is a phantom: a conjunction assessment computed against a catalog state that never actually existed.

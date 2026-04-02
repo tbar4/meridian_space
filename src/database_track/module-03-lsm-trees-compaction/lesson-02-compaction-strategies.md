@@ -7,7 +7,8 @@
 > **Source note:** This lesson was synthesized from training knowledge and the Mini-LSM course compaction chapters. Verify the specific amplification formulas against Petrov Chapter 7 and the RocksDB Tuning Guide.
 
 ---
-
+<!-- toc -->
+---
 ## Context
 
 Without compaction, the LSM engine accumulates SSTables indefinitely. Every flush creates a new SSTable in Level 0 (L0). After 100 flushes, there are 100 L0 SSTables — and a point lookup must check all of them. Read amplification grows linearly with the number of SSTables. Space amplification grows too: deleted keys still consume space in older SSTables, and updated keys have multiple versions.
