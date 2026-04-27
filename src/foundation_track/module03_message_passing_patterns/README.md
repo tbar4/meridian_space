@@ -27,6 +27,8 @@ By the end of this module you will be able to:
 - Merge multiple independent async sources into one stream using shared-sender MPSC (uniform sources), `select! { biased; }` (priority sources), and a router actor (dynamic sources)
 - Choose between `mpsc`, `broadcast`, `watch`, and `oneshot` given a fan-in or fan-out requirement
 
+<iframe src="rust-channels/index.html" width="100%" height="1200" style="border: none;"></iframe>
+
 ---
 
 ## Lessons

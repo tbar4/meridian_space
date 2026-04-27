@@ -20,6 +20,7 @@
   - [MPSC](./foundation_track/module03_message_passing_patterns/mpsc.md)
   - [Broadcast Watch](./foundation_track/module03_message_passing_patterns/broadcast_watch.md)
   - [Fan-In](./foundation_track/module03_message_passing_patterns/fan-in.md)
+  - [Interactive Examples](./foundation_track/module03_message_passing_patterns/interactive_examples.md)
   - [Project: Telemetry Aggregator](./foundation_track/module03_message_passing_patterns/project_telemetry_aggregator.md)
 ---
 - [Module 4: Network Programming](./foundation_track/module04_networking_programming/README.md)
