@@ -19,6 +19,7 @@ operator's memory consumption is O(N), and the operators above it (Filter, Proje
 output until all 100,000 rows have been consumed. Pipeline breakers are the main source of
 latency and memory pressure in query execution plans.
 """
+id = "e07dbfe3-322f-4dfb-999d-0b3bc2e0609b"
 
 [[questions]]
 type = "MultipleChoice"
@@ -41,6 +42,7 @@ this by using the B+ tree to jump directly to matching keys). A LIMIT clause on 
 would allow early termination once enough matching rows are found, but the Filter itself doesn't
 know about LIMIT — it just responds to next() calls.
 """
+id = "55d1235f-7ad1-4a01-9605-2ea0d7e362b1"
 
 [[questions]]
 type = "Tracing"
@@ -77,6 +79,7 @@ Project (* 2) transforms: 50, 60, 90, 100. The volcano model processes one row a
 the pipeline. Row 10 is scanned, fails the filter, and is discarded. Row 25 is scanned, passes
 the filter, and is projected to 50. And so on. The output is [50, 60, 90, 100].
 """
+id = "c8dd7bdf-186d-41b6-ba89-ba138df451e5"
 
 [[questions]]
 type = "MultipleChoice"
@@ -99,6 +102,7 @@ dispatch, function entry/exit, branch prediction) is amortized across the batch.
 DuckDB, DataFusion, and Velox all use vectorized execution for analytical queries. Unsafe code
 is never the answer to algorithmic overhead.
 """
+id = "34ffc4e3-d6f8-4a74-819f-6a706fd7b67d"
 
 [[questions]]
 type = "MultipleChoice"
@@ -122,3 +126,4 @@ first filter), reducing total calls. But the scan and first filter always proces
 rows. This per-row overhead is why vectorized execution (processing batches) is critical for
 CPU-bound workloads.
 """
+id = "e414867f-0090-498a-9ba2-50e1c1955bbc"

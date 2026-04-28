@@ -4,8 +4,11 @@ authors = ["Trevor Barnes"]
 language = "en"
 edition = "2024"
 
-# mdbook-quiz incomptaible with mdbook >= 0.5.0
+# mdbook-quiz 0.4.0 is the latest release; it embeds mdbook 0.4.45 and is
+# pinned in CI alongside mdbook 0.4.36. Future releases that require mdbook
+# 0.5+ would not be drop-in compatible without bumping MDBOOK_VERSION.
 [preprocessor.quiz]
+cache-answers = true
 #[preprocessor.callouts]
 
 [output.html]
