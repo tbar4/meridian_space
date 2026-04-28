@@ -68,3 +68,11 @@
   - [Vectorized Execution](./database_track/module-06-query-processing/lesson-02-vectorized-execution.md)
   - [Join Algorithms](./database_track/module-06-query-processing/lesson-03-join-algorithms.md)
   - [Project: Catalog Merge](./database_track/module-06-query-processing/project-catalog-merge.md)
+
+# Data Pipelines Track
+
+- [Module 1: Stream Processing Foundations](./data_pipelines_track/module-01-stream-processing-foundations/README.md)
+  - [Streams, Sources, and Sinks](./data_pipelines_track/module-01-stream-processing-foundations/lesson-01-streams-sources-sinks.md)
+  - [The Dataflow Model](./data_pipelines_track/module-01-stream-processing-foundations/lesson-02-dataflow-model.md)
+  - [Push, Pull, and Poll Semantics](./data_pipelines_track/module-01-stream-processing-foundations/lesson-03-push-pull-poll.md)
+  - [Project: Sensor Ingestion Service](./data_pipelines_track/module-01-stream-processing-foundations/project-sensor-ingestion.md)
