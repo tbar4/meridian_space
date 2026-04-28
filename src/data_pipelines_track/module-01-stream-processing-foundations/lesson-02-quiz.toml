@@ -29,7 +29,7 @@ the default choice for high-throughput stateful operators.
 
 [[questions]]
 id = "8d2a1c5e-7f3b-4e9d-b6a8-2c5e0a1b3f4d"
-type = "Tracing"
+type = "MultipleChoice"
 prompt.prompt = """
 Read this operator carefully:
 
@@ -54,6 +54,11 @@ Is this operator stateless or stateful, and what is the operational
 consequence of that classification for parallelization?
 """
 answer.answer = "Stateless — the catalog is an immutable lookup table shared via Arc, not per-event state. The operator can be replicated to N parallel instances, each holding the same Arc<HashMap>, with events load-balanced across them with no key-based partitioning required."
+prompt.distractors = [
+    "Stateful — the operator holds the catalog across iterations of the loop, so replicas must be partitioned by source_id to keep each replica's catalog consistent with the events it sees",
+    "Stateful — `with_catalog` mutates the observation in place, so two parallel replicas processing observations with the same source_id would race on the catalog entry",
+    "Stateless, but parallelization still requires partitioning by source_id so each replica owns the subset of orbital objects it enriches and downstream ordering per-key is preserved",
+]
 context = """
 Statefulness is about whether per-event processing depends on accumulated
 information from prior events. The Arc<HashMap> here is read-only, immutable,
