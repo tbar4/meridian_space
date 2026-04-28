@@ -58,7 +58,7 @@ transport.
 
 [[questions]]
 id = "0a3c5e7f-8d2b-4f1a-9c4e-6b8d1f3a5c20"
-type = "Tracing"
+type = "MultipleChoice"
 prompt.prompt = """
 Read this `next()` implementation for a polling source. Identify the most
 serious operational problem with it:
@@ -79,6 +79,11 @@ async fn next(&mut self) -> Result<Option<Observation>> {
 ```
 """
 answer.answer = "Two related problems: (1) it does not track a high-water-mark so it reprocesses the same records on every poll, and (2) it returns Err on empty responses instead of looping or sleeping again, which propagates as an error to the orchestrator instead of an idle state."
+prompt.distractors = [
+    "The `sleep` runs at the start of each poll instead of the end, which delays the very first observation by `poll_interval` after startup and biases steady-state latency upward",
+    "`reqwest::Client::send` is called without an explicit timeout, so a hung server blocks the source task indefinitely instead of surfacing as a recoverable error",
+    "`Result<Option<Observation>>` cannot represent the multi-record case, so the function silently truncates the response to its first element and discards the rest",
+]
 context = """
 This implementation has multiple defects. The most operationally serious
 is the lack of a watermark — every poll requests all records, so the same

@@ -53,7 +53,7 @@ and produces unbounded memory growth — the silent OOM pattern.
 
 [[questions]]
 id = "0b8c1f72-9d3e-4f5a-a4d8-6e2c7c5b1a90"
-type = "Tracing"
+type = "MultipleChoice"
 prompt.prompt = """
 You are reviewing a colleague's source implementation. They write the
 following sink-side method on the source struct itself:
@@ -78,6 +78,11 @@ async fn ingest_loop(&mut self, sink: ChannelSink) {
 What is the most serious correctness or operational problem with this loop?
 """
 answer.answer = "Spawning a task per observation removes backpressure: the source loops as fast as the source produces, regardless of downstream capacity, leading to unbounded task accumulation under load."
+prompt.distractors = [
+    "Cloning the sink on every iteration allocates a new mpsc::Sender, which leaks file descriptors over time and will eventually exhaust the process's FD limit",
+    "The `let _ =` on sink.write discards the Result, so transient send failures silently drop observations whenever the channel is briefly full",
+    "Logging in the Err arm without returning means a single transient source error puts the loop into a tight spin that pegs a CPU core until the source recovers",
+]
 context = """
 The issue is not the error logging or the channel cloning. The bug is that
 sink.write(obs).await — which would have suspended the loop until downstream
