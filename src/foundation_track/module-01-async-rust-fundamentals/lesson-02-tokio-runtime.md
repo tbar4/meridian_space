@@ -213,4 +213,4 @@ The double `?` on `.await.map_err(...)??` deserves explanation: `spawn_blocking`
 
 ---
 
-{{#quiz module1-lesson-02-quiz.toml}}
+{{#quiz lesson-02-quiz.toml}}
