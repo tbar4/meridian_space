@@ -1,0 +1,179 @@
+[[questions]]
+id = "53314bde-583f-458f-b77f-433c7fdf9462"
+type = "MultipleChoice"
+prompt.prompt = """
+A teammate adds a new operator to the SDA pipeline that calls the orbital
+propagator on every observation. Each call to `propagate()` is pure CPU
+work and takes 2–4 ms. They use `tokio::spawn` for the operator and run
+the propagator inline inside the operator's recv loop. Within an hour of
+deployment, an unrelated operator (the optical-archive HTTP poller) starts
+exhibiting P99 latency spikes of 100+ ms even though its own per-event
+work is unchanged. What is the most accurate explanation?
+"""
+answer.answer = "The propagator's 2–4 ms of uninterrupted CPU work between awaits holds whichever Tokio worker thread it runs on, starving every other task scheduled on that worker. With one such operator per worker thread in flight, the entire async runtime stalls for the duration of the propagation, and unrelated operators see the stalls as tail-latency spikes."
+prompt.distractors = [
+    "The Tokio runtime's work-stealing scheduler is migrating the propagator task between workers under contention; the migration cost is what drives the optical poller's latency",
+    "The `tokio::spawn` call allocates per-task memory at runtime; allocator contention from spawning many propagator tasks slows down unrelated operators",
+    "The propagator's CPU work is fine in an async task because Tokio's M:N scheduler will preempt it; the latency spike is from the operator's mpsc channel filling up under load",
+]
+context = """
+This is the canonical CPU-bound-in-async failure mode and the reason the
+lesson reaches for `spawn_blocking`. Tokio is cooperative: a task holds
+its worker thread until it hits an `.await` that returns Pending. The
+propagator does no I/O between ingest and emit, so its only await is the
+channel send at the end. Until then, it monopolizes the worker. With the
+default 8-worker runtime, eight in-flight propagations stall every other
+async operator — including the unrelated optical poller — for 2–4 ms. The
+work-stealing scheduler does not preempt CPU-bound tasks (it has no
+mechanism to; preemption requires a yield point). Allocator contention
+from spawning is real but trivial at this scale (microseconds per spawn).
+The fix is `tokio::task::spawn_blocking`, which dispatches the closure
+to the blocking pool and frees the async worker.
+"""
+
+[[questions]]
+id = "e986c67f-a672-492a-8645-fcc3a41a2c90"
+type = "MultipleChoice"
+prompt.prompt = """
+The orchestrator triggers shutdown by calling `.abort()` on every
+operator's `JoinHandle`. After the change to a new windowed dedup
+operator, you observe that on shutdown the dedup's RocksDB instance
+remains locked for the next process invocation, requiring a manual
+file-system unlock to recover. The dedup operator holds a RocksDB
+write batch across `mpsc::Receiver::recv().await`, committing the
+batch every 1000 events. What is happening, and what is the right fix?
+"""
+answer.answer = "The recv() await is cancel-safe, but the open RocksDB write batch is not — when abort drops the operator's future at that await, the batch is leaked along with the underlying lock file handle. The fix is to wrap the recv in a `select!` against a CancellationToken and explicitly drop or commit the batch in the cancel branch before returning."
+prompt.distractors = [
+    "`mpsc::Receiver::recv()` is non-cancel-safe; an in-flight recv when the future is dropped corrupts the channel state and prevents subsequent reads. Replace recv with `try_recv` in a loop with a sleep",
+    "`JoinHandle::abort()` panics RocksDB's internal threads, which in turn panic the runtime worker; switch to a graceful shutdown by sending a Shutdown variant on the channel itself and matching on it in recv",
+    "The bug is that the operator runs on a Tokio worker rather than on `spawn_blocking`; RocksDB's locking is not async-safe, and moving it to a blocking task gives it the synchronous semantics it expects",
+]
+context = """
+The lesson's cancel-safety frame is exactly the right tool. `recv` itself
+is documented as cancel-safe — the channel does not lose state when its
+in-flight recv future is dropped. The non-cancel-safe element is the
+RocksDB write batch the operator owns across the await. When `abort()`
+drops the future, the batch's destructor may run, but RocksDB's locking
+semantics expect either an explicit `commit` or `rollback` before drop;
+the implicit drop leaves the lock in a state the next process invocation
+sees as stuck. The fix is the same pattern shown in the lesson: select
+between the recv and a cancellation token, and use the cancel branch to
+unwind the in-flight batch deliberately. The other distractors invert the
+reality (recv is cancel-safe, abort doesn't panic, the work isn't
+CPU-bound enough to need spawn_blocking) and would each introduce new
+bugs while pointing at the wrong culprit.
+"""
+
+[[questions]]
+id = "22e34401-aedc-4524-839e-d0db86cceac3"
+type = "MultipleChoice"
+prompt.prompt = """
+You are reviewing four candidate operator implementations. Which one is
+correctly cancel-safe at every await point, in the sense that aborting
+the task at any await leaves no observable side effects partially applied?
+
+  (A) An operator that calls `reqwest::Client::get(url).send().await` and
+      then `.json::<Vec<Record>>().await`, parsing each record and
+      forwarding to a downstream channel.
+
+  (B) An operator that holds a `Mutex<HashMap<Id, State>>` guard across
+      a `mpsc::Sender::send(state).await` so the downstream sees the
+      state under the same lock that produced it.
+
+  (C) An operator that loops `tokio::time::sleep(Duration::from_millis(50)).await`
+      and on each tick reads its current bookkeeping field and forwards
+      a heartbeat envelope via `mpsc::Sender::send(hb).await`.
+
+  (D) An operator that opens a tokio file handle, calls
+      `file.write_all(&buf).await`, and on success increments an
+      in-memory counter that is read by the supervisor for metrics.
+"""
+answer.answer = "(C) — sleep and mpsc send are both individually cancel-safe, no resource is held across either await, and dropping the future at either point leaves nothing partial. The heartbeat that was about to send is simply not sent."
+prompt.distractors = [
+    "(A) — reqwest's send() and json() awaits are individually cancel-safe and the parsing logic between them is synchronous, so abort at any point is clean",
+    "(B) — the Mutex guard is held across the channel send, but the guard's drop is well-defined and the channel send is cancel-safe, so the operator is safe overall",
+    "(D) — file.write_all is cancel-safe under tokio because the underlying writev is atomic at the kernel level, and dropping the in-flight future leaves no partial write",
+]
+context = """
+(C) is correct because both sleep and send are cancel-safe primitives
+and no third resource is held across either. The other three illustrate
+common ways operators become non-cancel-safe. (A) sounds fine until you
+notice that `.json()` reads the response body across multiple awaits; if
+the future is dropped mid-body, the underlying TCP connection is left in
+an indeterminate state and the connection pool can leak. (B) is the
+classic guard-across-await bug: the Mutex guard is held across an
+arbitrary suspension; an abort during the send drops the guard with the
+state in whatever intermediate condition the operator left it. (D)'s
+`write_all` is documented in tokio as NOT cancel-safe in general — a
+dropped in-flight write may have written some prefix of the buffer, and
+the in-memory counter is incremented only on success, so the counter and
+the file disagree about how many bytes were written. The lesson's rule
+applies: cancel-safety is a per-await-point property, and adding more
+awaits adds more places to violate it.
+"""
+
+[[questions]]
+id = "acea9858-1c47-43be-bec9-92d857447150"
+type = "MultipleChoice"
+prompt.prompt = """
+The orchestrator spawns a CPU-bound task that runs a tight loop with no
+await points inside it, waits 50 ms, then calls `handle.abort()` and
+awaits the handle. The match on the resulting `JoinError` reports
+`is_cancelled() == true`. A teammate concludes "the task was cancelled
+successfully and is no longer running." What is the most accurate
+correction?
+"""
+answer.answer = "The handle resolves to cancelled the moment abort() is called, but cancellation is cooperative: the task itself only observes the cancellation flag at an await point, and a tight loop with no awaits ignores it indefinitely. The task is still running on its worker thread; the handle's reported state and the task's actual state diverge. The pipeline-shutdown corollary: abort() alone cannot stop a CPU-bound task — that requires either `spawn_blocking` plus a shared cancellation flag the loop polls, or a redesign to insert yields."
+prompt.distractors = [
+    "abort() is synchronous: by the time it returns, the task's worker thread has been signaled to stop and the task is no longer scheduled. is_cancelled() reflects ground truth",
+    "The is_cancelled() flag means the task panicked during cancellation cleanup; the task is actually finished but exited via the panic path rather than a normal return",
+    "In a tokio multi-thread runtime, abort() preempts CPU-bound tasks via a SIGUSR1-style signal to their worker thread; the task is reliably stopped within microseconds",
+]
+context = """
+This is the canonical confusion around cooperative cancellation. abort()
+sets a flag the task observes only at its next await point. A loop with
+no awaits ignores the flag for as long as the loop runs. The JoinHandle
+view, however, is updated as soon as abort() is called — awaiting the
+handle resolves with a JoinError where is_cancelled() is true. The
+handle's view (cancelled, because someone asked) and the task's view
+(still running, because no await yielded) genuinely diverge for
+CPU-bound tasks. The runtime has no preemption mechanism for async
+tasks; preemption would require yield points the runtime injected, and
+Tokio does not do that. The corollary the lesson states explicitly:
+CPU-bound work belongs on spawn_blocking, and even there abort() is
+not a substitute for cooperative shutdown — use a CancellationToken
+or a shared atomic the loop polls every N iterations.
+"""
+
+[[questions]]
+id = "00edf5c6-7b67-45d1-b61f-da483a6c6d3f"
+type = "MultipleChoice"
+prompt.prompt = """
+A junior engineer wraps every operator in a custom `Operator` struct that
+implements Drop. The Drop impl calls `self.handle.abort()` on the wrapped
+JoinHandle, with the intent that 'when the orchestrator drops the
+Operator, the task is cancelled too.' Code review flags this as wrong.
+What is the strongest objection?
+"""
+answer.answer = "Drop runs synchronously and abort is cooperative: even after Drop returns, the task may still be running on its worker thread because it has not yet reached an await point. The orchestrator's caller has no way to wait for the task to actually exit, so resources the task held (open files, channel ends, locked mutexes) may still be held when the next operation runs. The right pattern is an explicit async `shutdown(self) -> impl Future` method the orchestrator can `.await`, leaving Drop as a last-resort detach."
+prompt.distractors = [
+    "Drop cannot call methods on JoinHandle because JoinHandle is not Drop-safe; the Drop call would itself panic",
+    "abort()' inside Drop double-aborts the task because the JoinHandle is also being dropped on the same line, and Tokio panics on double-abort",
+    "Drop is the wrong place because abort() is asynchronous; calling it from a synchronous context like Drop produces a runtime panic about 'called outside of a Tokio context'",
+]
+context = """
+The objection that holds up is the asynchrony mismatch. Drop is
+synchronous and cannot await. abort() returns instantly because it just
+sets a flag; the task may still be running for an arbitrary amount of
+time after Drop returns. The Operator's caller has no way to know when
+the task actually finished, which means any invariant 'after dropping
+the Operator, its resources are released' is false. The right pattern
+is the one the lesson advocates: an explicit async shutdown method the
+orchestrator awaits, with Drop as a fallback that detaches (the default
+behavior — no special impl needed). The other answers invent invariants
+Tokio does not have. JoinHandle is Drop-safe (drop detaches by default).
+abort() is idempotent and double-abort is a no-op. abort() does not
+require a Tokio context for its synchronous flag-setting; it works
+because the runtime owns the wakeup machinery.
+"""
