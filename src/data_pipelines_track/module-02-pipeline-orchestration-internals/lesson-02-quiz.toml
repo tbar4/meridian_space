@@ -1,0 +1,179 @@
+[[questions]]
+id = "f8c739bc-5622-4769-ba2b-51366afffc73"
+type = "MultipleChoice"
+prompt.prompt = """
+The SDA topology has three sources (radar, optical, ISL) all feeding into
+a single normalize operator, which then feeds dedup, which feeds a
+correlator, which fan-outs to two sinks (alert emitter, audit log).
+You build this with the OperatorGraph type from the lesson, but every
+edge has a 1024-element capacity. Under steady-state load, what does
+the topo-sorted spawn order from Kahn's algorithm look like, and which
+property of the order matters operationally?
+"""
+answer.answer = "All three sources are spawned first (any order among them — they share in-degree 0), then normalize, then dedup, then correlator, then the two sinks (any order among them — they share predecessor correlator). The operational property: every operator is spawned only after its upstream's channel exists and has been allocated, so the receiver end is available to hand to it. Kahn's level-by-level structure naturally produces this property without any extra bookkeeping."
+prompt.distractors = [
+    "The order is sinks first (because they have no outgoing edges, the algorithm starts from them) and works back to sources; this matches how DDIA describes execution-graph startup",
+    "The order is whichever vertices happen to be inserted first in the builder's vertex list; topo sort only validates acyclicity and does not affect spawn order",
+    "The order interleaves sources and operators (radar, normalize, optical, dedup, ISL, correlator, sinks) to maximize parallelism during startup; this is the 'wave' scheduling pattern Flink uses",
+]
+context = """
+Kahn's algorithm initializes the ready queue with every vertex of in-degree
+0 — the sources, in this topology. As each is removed from the ready
+queue, its outgoing edges' destinations have their in-degrees decremented;
+when normalize's in-degree drops to 0 (after all three sources have been
+processed), it joins the ready queue. The level-by-level pattern is what
+makes the spawn order match what an engineer thinks of as 'start at the
+top.' The ordering matters because the channel-wiring code in build()
+assumes that when it processes an operator, both halves of its incoming
+edge already exist in the channel map (allocated in pass 3). The spawn
+loop pulls the receiver out of the map and hands it to the operator's
+factory; if the operator were spawned before pass 3 finished, the
+receiver would not be there. The other answers are wrong: Kahn does not
+start from sinks, builder insertion order does not determine spawn order,
+and Flink's wave pattern is a runtime scheduling thing within a job
+manager, not the build-time topo sort being discussed here.
+"""
+
+[[questions]]
+id = "b2d914dc-9f65-438a-9094-1121deb7b1e7"
+type = "MultipleChoice"
+prompt.prompt = """
+A teammate adds a new "validate" operator to the SDA pipeline using the
+OperatorGraph builder. They call `add_operator("validate", ...)` and
+`connect(normalize, validate, 1024)`, but forget to call
+`connect(validate, dedup, ...)`. What happens?
+"""
+answer.answer = "OperatorGraph::build() returns Err. The per-role validation pass observes that the validate operator has Role::Operator with a None outgoing edge, and produces an error message naming the operator and the missing direction: \"operator validate has no outgoing edge; did you forget to connect()?\""
+prompt.distractors = [
+    "The build succeeds and the pipeline starts. The validate operator drains observations from its incoming channel into a void with no downstream, applying false backpressure to normalize until ops notices the symptom",
+    "The build succeeds, but the orchestrator's startup self-test (a synthetic observation injected at every source) fails to reach the audit sink, surfacing the missing edge as a runtime error",
+    "Kahn's algorithm rejects the graph because validate has in-degree > 0 but no outgoing path to a sink, treating it as a partial cycle; the error message describes it as a cycle even though it is not one",
+]
+context = """
+This is the disconnection bug the lesson called out as one of the two
+build-time validations the orchestrator gives you. Pass 1 of build() runs
+through every vertex and matches on its role: an operator role with a
+missing incoming or outgoing edge fails the validation immediately, before
+any channels are allocated, and the error message names the operator and
+the missing direction. The diagnostic is the orchestrator's primary
+advantage over hand-spawned topology: a bug that would otherwise produce
+a silent symptom in production (a stage that runs forever with no input,
+or a stage whose output is read by nobody) becomes a clear startup-time
+error. The 'partial cycle' answer is wrong: Kahn's algorithm has no notion
+of partial cycles; an operator with no outgoing edge produces no in-degree
+decrement and simply exits the ready queue without consequence to the
+acyclicity check.
+"""
+
+[[questions]]
+id = "5ea80c43-9aca-404a-a02d-17b48760e8d5"
+type = "Tracing"
+prompt.program = """
+use std::collections::VecDeque;
+
+fn main() {
+    // Edges of a small DAG: radar(0) -> normalize(2), optical(1) -> normalize(2),
+    // normalize(2) -> dedup(3), dedup(3) -> sink(4).
+    let edges: Vec<(usize, usize)> = vec![(0,2),(1,2),(2,3),(3,4)];
+    let n: usize = 5;
+    let names = ["radar","optical","normalize","dedup","sink"];
+
+    // Compute in-degrees.
+    let mut in_deg = vec![0usize; n];
+    for &(_, b) in &edges { in_deg[b] += 1; }
+
+    // Kahn's algorithm.
+    let mut ready: VecDeque<usize> = (0..n).filter(|&i| in_deg[i] == 0).collect();
+    let mut order: Vec<usize> = Vec::new();
+    while let Some(v) = ready.pop_front() {
+        order.push(v);
+        for &(a, b) in &edges {
+            if a == v {
+                in_deg[b] -= 1;
+                if in_deg[b] == 0 { ready.push_back(b); }
+            }
+        }
+    }
+
+    // Print the topo order as space-joined operator names.
+    let names_in_order: Vec<&str> = order.iter().map(|&i| names[i]).collect();
+    println!("{}", names_in_order.join(" "));
+}
+"""
+answer.doesCompile = true
+answer.stdout = "radar optical normalize dedup sink"
+context = """
+Kahn's algorithm seeds the ready queue with every vertex whose in-degree
+is 0. Here that is radar (0) and optical (1) — both sources with no
+upstream. The VecDeque iteration order is FIFO, so radar is popped first
+(insertion order: 0, 1, 2, 3, 4 — only 0 and 1 enter at start, with
+radar first). After radar is popped and order = [radar], its outgoing
+edge to normalize decrements normalize's in-degree from 2 to 1; normalize
+does not yet enter ready. Optical is popped next (order = [radar, optical]),
+its edge to normalize decrements in-degree from 1 to 0, and normalize
+enters ready. normalize is popped (order = [radar, optical, normalize]),
+its edge to dedup makes dedup's in-degree 0; dedup is popped, makes sink's
+in-degree 0; sink is popped. The final printed order is exactly the
+level-by-level structure the lesson described: sources first, then their
+common consumer, then the rest of the chain.
+"""
+
+[[questions]]
+id = "43378087-d3fb-44a9-9c3e-b4c32568376c"
+type = "MultipleChoice"
+prompt.prompt = """
+The orchestrator owns N operator JoinHandles after spawning the topology.
+A teammate proposes managing them with `tokio::join!(h1, h2, h3, ..., hN)`
+to wait for all of them. Why does the lesson recommend `JoinSet` instead?
+"""
+answer.answer = "tokio::join! waits for *all* of its arguments to complete in lockstep — there is no way to react to whichever finishes first. A panic in one operator does not surface to the supervisor until every other operator also exits. JoinSet's join_next() returns each task's result as soon as that task completes, so the supervisor can react immediately (restart, log, escalate) without waiting for unrelated operators to finish. JoinSet also has abort_all() for graceful shutdown, which join! has no equivalent of."
+prompt.distractors = [
+    "tokio::join! requires its arguments to be macro-time-known fixed-arity, so it cannot scale past about 16 operators; JoinSet works for arbitrary N",
+    "tokio::join! requires every argument to have the same return type, but operators in a real pipeline return heterogeneous types (Result<()>, Result<u64>, Result<Vec<Obs>>); JoinSet erases the return type via dyn",
+    "tokio::join! pins all its futures into a single combined future, which exhausts the stack-frame size limit when N exceeds about 32; JoinSet stores each task in a separate heap-allocated slot",
+]
+context = """
+The reason matters for understanding the supervisor pattern in Lesson 4.
+join! is for a small fixed set of futures whose results you want all at
+once. JoinSet is for a dynamic set of in-flight tasks whose results you
+want as they arrive — exactly the supervisor's situation. The arity
+limit answer is wrong (join! handles arbitrary arity via tuples up to a
+practical limit but the limit is not 16). The heterogeneous-return-type
+answer is wrong because the lesson explicitly standardizes every operator
+on Result<()>. The stack-frame answer is invented; join! does not have
+that problem. The real reason is the operational one: the supervisor needs
+'whichever finishes first' semantics, not 'all of them at once.'
+"""
+
+[[questions]]
+id = "e716f233-9e63-49c9-98f3-69b8a708fc6c"
+type = "MultipleChoice"
+prompt.prompt = """
+A real SDA pipeline has two sources (radar, optical) feeding a single
+normalize operator. The current OperatorGraph type from the lesson allows
+only one incoming edge per operator. To express the fan-in correctly,
+which approach is consistent with the lesson's design?
+"""
+answer.answer = "Insert an explicit fan-in router operator between the sources and normalize. The router has its own role (effectively an Operator with multiple incoming edges that it merges, conceptually a special case the orchestrator can model as a small extension) or, more simply, the two sources each connect to a thin merger operator that owns its own mpsc receiver from each. The 'one incoming edge per operator' rule is preserved by composing fan-in out of single-edge operators."
+prompt.distractors = [
+    "Cancel the lesson's design and switch to multi-edge operators where every operator can have arbitrary fan-in. The lesson's restriction is a flaw to be corrected before shipping",
+    "Use the same channel from both sources by cloning the mpsc::Sender — connect(radar, normalize) and connect(optical, normalize) both refer to the same edge ID. The graph then has one logical edge with two writers",
+    "Place a tokio::select! at normalize's top that reads from two separate mpsc::Receivers, one per source. The graph still has two edges into normalize, but normalize's implementation handles the fan-in in its body rather than at the type level",
+]
+context = """
+The lesson's choice is a deliberate simplification: keep the graph's edge
+constraints simple and express fan-in/fan-out via explicit router
+operators. This trades a small amount of expressiveness (you cannot say
+'this normalize takes two inputs directly') for a cleaner topo sort,
+clearer error messages, and a uniform spawn pattern. The two distractors
+show common temptations. Multi-edge operators (distractor 1) make the
+topo sort harder and the wiring code more complex; the right answer
+recovers the missing expressiveness with composition. Cloning Senders
+into one channel (distractor 2) is technically valid in tokio (mpsc::Sender
+is Clone) but breaks the graph's invariant that each edge has exactly one
+writer and one reader, and breaks Module 3's watermark-propagation logic
+(min-of-inputs requires the inputs to be distinguishable). The select!
+approach (distractor 3) re-introduces multi-incoming at the operator
+level even if the graph type pretends otherwise; same fundamental issue
+as distractor 1.
+"""
