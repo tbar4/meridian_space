@@ -1,0 +1,201 @@
+[[questions]]
+id = "a5649311-4022-4321-bd23-76ae04e05e27"
+type = "MultipleChoice"
+prompt.prompt = """
+The optical-archive REST endpoint goes down for 30 seconds during a partner
+deploy. The SDA pipeline runs 100 operator instances, each independently
+polling the archive every 5 seconds. A junior engineer adds retries with
+fixed 1-second delay and unlimited attempts to handle this scenario. What
+happens during the 30-second outage and the recovery window?
+"""
+answer.answer = "All 100 instances hit the failure within their 5-second poll cycles. Each retries every 1 second; their retry timing synchronizes within seconds because they all back off the same delay from the same recent failure. When the archive starts recovering, all 100 instances retry within the same second, hammering it with synchronized request bursts that prevent it from staying healthy. The 30-second planned outage extends to many minutes of post-outage instability — the canonical thundering herd."
+prompt.distractors = [
+    "Each instance retries independently every 1 second; the archive sees 100 RPS during the outage and the same after recovery. The recovery is clean because the steady 100 RPS is well within the archive's normal capacity",
+    "The fixed delay produces no thundering herd because each instance's clock is uncorrelated with the others. The retries are uniformly distributed across each second-long window",
+    "The unlimited attempts is the dominant problem; the pipeline silently buffers observations during the outage, blowing memory when the burst arrives. Fixing the attempts to a finite count solves the thundering-herd issue too",
+]
+context = """
+The thundering-herd dynamic is the reason the lesson's retry policy uses
+jitter. With fixed delays, retry phase locks: each instance's failure
+resets its retry clock, and a shared downstream failure resets every
+instance's retry clock to the same instant. The next retry happens at
+the same instant for every instance. The recovery is worse than the
+outage because the recovering archive is hit with a synchronized 100-RPS
+burst at the same second, causes itself to fall over, restarts the
+cycle. Decorrelated jitter (random_uniform(initial, prev_delay * 3))
+breaks the synchronization: each instance's next-retry time is uncorrelated
+with any other instance's. The unlimited-attempts answer is partially
+right (it is also a problem) but is not the dominant cause of the recovery
+failure; even with bounded attempts, fixed-delay retries amplify the
+outage. The 'uniformly distributed' answer is wrong because the instances
+do not start uncorrelated — they all observe the same downstream failure
+at roughly the same time and reset their retry phase to that moment.
+"""
+
+[[questions]]
+id = "604f48c9-c0b6-4944-ba18-3d94467c2c96"
+type = "MultipleChoice"
+prompt.prompt = """
+Which of the following retry policies is most consistent with the lesson's
+recommendation, given a flaky downstream HTTP endpoint that may be
+unavailable for 10–60 seconds at a time and that has a hard rate limit
+of 50 RPS at the recovering server?
+"""
+answer.answer = "Decorrelated-jitter exponential backoff with initial=200ms, cap=15s, max_attempts=8. Across 100 operator instances, the per-instance retry rate during a 60-second outage averages well under 1 RPS each (because the cap dominates), and the jitter desynchronizes the bursts."
+prompt.distractors = [
+    "Linear backoff with delay = attempt * 1s, max_attempts=30. The deterministic schedule is easier to reason about and the maximum delay (30s) bounds total wait time clearly",
+    "Fixed-delay retry with delay=500ms, max_attempts=120. Total retry budget is 60 seconds, which matches the maximum outage duration, so the policy is sized to the failure mode",
+    "Decorrelated-jitter exponential backoff with initial=10ms, cap=100ms, max_attempts=1000. The aggressive bounds give fast recovery on transient blips and the high attempt count covers extended outages",
+]
+context = """
+The right answer respects three things: jitter (decorrelated), an
+exponential schedule (so blip-length outages recover fast), and a cap
+that prevents pathological delay growth (so a 60-second outage settles
+into a low retry rate well within the rate limit). Linear backoff
+synchronizes (no jitter mentioned) and the delay growth is too slow to
+back off effectively. Fixed-delay retry is the thundering-herd shape
+from question 1. The aggressive-jittered policy in distractor 3 has
+the right shape but pathologically wrong magnitudes — a 100ms cap on a
+downstream that takes 10–60s to recover means each instance is firing
+~10 RPS sustained, which 100 instances aggregate to 1000 RPS — twenty
+times the rate limit. Sizing matters. The lesson's Reis & Housley
+framing of orchestration as the connective tissue of the lifecycle has
+its concrete instance here: the retry policy IS connective-tissue
+configuration, and getting its magnitudes right requires knowing the
+downstream's recovery characteristics.
+"""
+
+[[questions]]
+id = "59f566a8-0621-46dc-8ee5-81b171db5188"
+type = "Tracing"
+prompt.program = """
+fn main() {
+    // Simulate decorrelated-jitter backoff with the random component
+    // pinned to a deterministic 'pick the upper bound every time' for
+    // tracing. Real code uses a uniform RNG; here the schedule is
+    // fully determined.
+    let initial_ms: u64 = 100;
+    let cap_ms: u64 = 5000;
+    let max_attempts: u32 = 6;
+
+    let mut prev_ms = initial_ms;
+    let mut total_ms: u64 = 0;
+    for attempt in 1..=max_attempts {
+        // Decorrelated jitter: random_uniform(initial, prev * 3),
+        // capped at cap_ms. Using upper bound here for determinism.
+        let upper = std::cmp::max(prev_ms.saturating_mul(3), initial_ms);
+        let delay = std::cmp::min(upper, cap_ms);
+        total_ms += delay;
+        println!("attempt={} delay_ms={}", attempt, delay);
+        prev_ms = delay;
+    }
+    println!("total_ms={}", total_ms);
+}
+"""
+answer.doesCompile = true
+answer.stdout = """attempt=1 delay_ms=300
+attempt=2 delay_ms=900
+attempt=3 delay_ms=2700
+attempt=4 delay_ms=5000
+attempt=5 delay_ms=5000
+attempt=6 delay_ms=5000
+total_ms=18900"""
+context = """
+Tracing decorrelated jitter with the 'always upper bound' pinning shows
+the schedule's exponential ramp and its cap. Attempt 1: upper = max(100*3,
+100) = 300, delay = min(300, 5000) = 300, prev becomes 300. Attempt 2:
+upper = 300*3 = 900, delay = 900. Attempt 3: 2700. Attempt 4: 8100, but
+cap kicks in: delay = min(8100, 5000) = 5000. Attempt 5: 15000, capped to
+5000. Attempt 6: 15000, capped to 5000. The total backoff time is
+300+900+2700+5000*3 = 18900 ms — about 19 seconds across the 6 attempts.
+This is what the wrapper actually waits across one operator instance's
+retry budget against the cap of 5s/attempt. With real (uniform random)
+jitter, the per-attempt delays are stochastic in the range [initial,
+upper]; the cap still dominates after attempt 4. The lesson's design
+choice is in this shape: the cap is what bounds the total wait time, the
+exponential is what produces fast recovery on short blips, and the jitter
+is what desynchronizes a fleet of operator instances.
+"""
+
+[[questions]]
+id = "6e69dab1-ec63-4934-b285-c7e003881a54"
+type = "MultipleChoice"
+prompt.prompt = """
+Read this 'idempotent' counter-update operator. It tracks the count of
+unique observations per orbital object via a HashMap and increments only
+when the observation_id has not been seen before. A teammate insists
+this is idempotent because of the seen-id check.
+
+```rust,ignore
+async fn count_unique(
+    mut input: mpsc::Receiver<Observation>,
+    output: mpsc::Sender<CountSummary>,
+) -> Result<()> {
+    let mut count_per_object: HashMap<String, u64> = HashMap::new();
+    let mut seen: HashSet<Uuid> = HashSet::new();
+    while let Some(obs) = input.recv().await {
+        if seen.insert(obs.observation_id) {
+            *count_per_object.entry(obs.target_object_id.clone()).or_insert(0) += 1;
+            output.send(CountSummary { ... }).await?;
+        }
+    }
+    Ok(())
+}
+```
+
+Why is this NOT idempotent in the sense the lesson means, despite the
+seen-id check?
+"""
+answer.answer = "Idempotency is a property of the operator's effect on the world over restarts, not just within a single run. The seen set lives in process memory and is lost on restart. After a crash and replay, the operator processes the same observation_ids it saw before, the seen check fails (the set is empty), and it increments the per-object count again — producing duplicate emissions and incorrect counts."
+prompt.distractors = [
+    "The HashMap clone of obs.target_object_id allocates on every iteration; allocation is non-deterministic across runs, so the operator is observably non-idempotent",
+    "The mpsc send is not idempotent (downstream may double-process the CountSummary), so the operator inherits non-idempotency from its sink",
+    "HashSet::insert returns the previous presence as a bool that the operator branches on, which is technically a side effect — pure idempotency requires the operator have no observable state changes",
+]
+context = """
+The lesson is precise that idempotency must hold across restarts, not
+just within a single run, because retries in production happen across
+process boundaries (a crashed and restarted operator). The in-process
+seen set is lost on restart; on the replay of the input, the counter
+increments again. The same observation_id produces a second CountSummary
+emit and a second increment. The fix is what Module 5's checkpointing
+lesson develops: the seen set must be persisted (to local disk, to
+RocksDB, to a distributed store) and restored on restart. Until then, a
+'seen-set in memory' design is process-lifetime-local and is not the
+exactly-once-effective property the pipeline needs. The other distractors
+each invent unrelated objections: the clone is not the issue; the
+downstream's idempotency is a separate concern; HashSet::insert's bool
+return value is fine.
+"""
+
+[[questions]]
+id = "3e58bb7d-a621-4f27-a98c-3f69214580f1"
+type = "MultipleChoice"
+prompt.prompt = """
+The dedup sink from the lesson uses a sliding-window seen-set bounded by
+time and count. A teammate suggests removing the count cap and relying
+only on the time-based eviction, arguing 'the time bound already keeps
+memory bounded under any sane event rate.' What is the strongest
+objection?
+"""
+answer.answer = "The count cap is a safety valve for ingestion bursts that exceed the time-window's implicit capacity. During a 10x burst (e.g., a fragmentation-event surge), the time-based eviction lags behind ingest and the seen-set grows past its design size before the eviction loop catches up. The count cap forces FIFO eviction independent of time, keeping memory bounded even when the time-eviction loop has not run recently."
+prompt.distractors = [
+    "BTreeSet operations are O(log N) on the stored keys; without a cap, lookup costs grow unboundedly during sustained traffic, even though memory itself is bounded by the time window",
+    "The time-based eviction requires SystemTime::now() on every event, which is non-monotonic; clock skew can cause entries to be evicted prematurely or held forever depending on the direction of the skew",
+    "Without a cap, the seen-set grows during deduplication-window-spanning duplicates (the same observation_id seen 3 times in a 5-minute window registers 3 entries); the cap prevents this growth",
+]
+context = """
+The cap-as-safety-valve framing is the design principle. Time-based
+eviction is correct in steady state but lags during bursts because the
+eviction loop runs only when a new observation arrives (and walks the
+deque from the front). A 10x burst causes ingestion to outrun eviction
+for the duration of the burst; without the count cap, memory grows in
+proportion to peak burst size times duration. The cap forces eviction
+to keep up by triggering on size, not just on time. The distractor
+about BTreeSet O(log N) is partially true but is not the dominant
+concern at SDA's scale (millions of entries are still microsecond-scale
+lookups). The clock-skew distractor is real (it is one reason real
+pipelines use monotonic clocks for eviction) but is not the reason for
+having a cap. The third distractor mistakes how the seen-set works:
+the same observation_id inserts only once because BTreeSet is a set.
+"""
