@@ -1,0 +1,167 @@
+[[questions]]
+id = "a3c5e9f2-1b4d-4f6a-8c2e-7d3b9c1e0a45"
+type = "MultipleChoice"
+prompt.prompt = """
+A teammate proposes implementing the SDA correlator (which fuses observations
+from multiple sensors into a single track per orbital object) as a stateless
+map operator that reads each observation, looks up the current track in an
+external Redis cluster, updates it, and writes it back. What is the most
+important architectural consequence of this design?
+"""
+answer.answer = "Per-event Redis round-trips become the dominant latency cost; throughput is bounded by the latency-bandwidth product of the network, not by CPU on the operator host."
+prompt.distractors = [
+    "The operator is no longer stateless because it depends on Redis, so it must be partitioned",
+    "Redis cannot serve as a state backend for streaming systems because it does not support transactions",
+    "External state introduces a single point of failure that prevents the pipeline from being highly available",
+]
+context = """
+The operator is technically still 'stateless' from the perspective of the
+framework — its in-process state is empty — but every event triggers a
+network round-trip to Redis. At even modest latencies (1ms p99), this caps
+single-replica throughput at ~1000 events/sec, which is far below SDA's
+expected load. The other answers are partially right but not the dominant
+issue: partitioning is a property of how state is colocated with the operator,
+not of where the state lives; Redis does support transactions; HA is
+addressable with replication. The latency-bandwidth cost is the unavoidable
+consequence of the design and the reason embedded state (RocksDB-style) is
+the default choice for high-throughput stateful operators.
+"""
+
+[[questions]]
+id = "8d2a1c5e-7f3b-4e9d-b6a8-2c5e0a1b3f4d"
+type = "Tracing"
+prompt.prompt = """
+Read this operator carefully:
+
+```rust,ignore
+pub async fn enrich_operator(
+    mut input: mpsc::Receiver<Observation>,
+    output: mpsc::Sender<Observation>,
+    catalog: Arc<HashMap<String, OrbitalCatalog>>,
+) -> Result<()> {
+    while let Some(obs) = input.recv().await {
+        let enriched = match catalog.get(&obs.source_id.0) {
+            Some(meta) => obs.with_catalog(meta.clone()),
+            None => obs,
+        };
+        output.send(enriched).await?;
+    }
+    Ok(())
+}
+```
+
+Is this operator stateless or stateful, and what is the operational
+consequence of that classification for parallelization?
+"""
+answer.answer = "Stateless — the catalog is an immutable lookup table shared via Arc, not per-event state. The operator can be replicated to N parallel instances, each holding the same Arc<HashMap>, with events load-balanced across them with no key-based partitioning required."
+context = """
+Statefulness is about whether per-event processing depends on accumulated
+information from prior events. The Arc<HashMap> here is read-only, immutable,
+and shared — every operator instance sees the same catalog. The operator is
+stateless and can be parallelized by simple load-balancing (round-robin or
+random) across replicas with no per-key partitioning required. Contrast
+with the dedup operator from the lesson, which holds last_seen state that
+*does* depend on prior events — that one would require partitioning by key
+if scaled out, so each replica saw all events for the keys it owned. The
+distinction matters operationally: scaling stateless operators is essentially
+free; scaling stateful operators requires resharding state, which is much
+more expensive.
+"""
+
+[[questions]]
+id = "b6f3a1d8-2e4c-49a7-9b5d-3c8e6f1a2b40"
+type = "MultipleChoice"
+prompt.prompt = """
+The SDA topology fans three sources (radar, optical, ISL) into a single
+normalize operator using a shared mpsc Sender cloned three ways. The radar
+source produces 5,000 events/sec, the optical source 50/sec, and the ISL
+source 100/sec. The normalize operator runs at ~6,000 events/sec capacity.
+What does the topology actually do under steady-state load?
+"""
+answer.answer = "All three sources flow at full rate without backpressure; the channel sits with low occupancy, and total throughput is ~5,150 events/sec — well under normalizer capacity."
+prompt.distractors = [
+    "The radar source dominates the channel and starves the optical and ISL sources of capacity, dropping their events",
+    "The mpsc channel rebalances based on send rate so each source gets one-third of the channel's capacity",
+    "Backpressure on the radar source forces it to slow down to one-third of its native rate to share capacity equally with the slower sources",
+]
+context = """
+mpsc with multiple senders is FIFO at the channel level — each send call
+takes a slot in the order it arrives, regardless of which sender it came
+from. Under steady state with normalizer capacity exceeding aggregate input,
+no source experiences backpressure: 5,000 + 50 + 100 = 5,150 events/sec
+goes through the 6,000-events/sec normalizer without occupancy buildup.
+The other answers reflect intuitions that don't match how mpsc behaves —
+mpsc is not weighted, it does not 'starve' slow senders, and it does not
+apply backpressure unless the channel is at capacity. Understanding this is
+critical for sizing channel buffers and predicting failure modes.
+"""
+
+[[questions]]
+id = "1e7c0b4a-5d8f-4a2c-87e3-9f6c1b3d8e02"
+type = "MultipleChoice"
+prompt.prompt = """
+You are reviewing a topology where two stateful operators (a windowed
+aggregator and a stream-stream join) are placed back-to-back. Both partition
+their input by orbital object ID. A teammate suggests fusing them into a
+single combined operator to avoid the channel between them. What is the
+strongest argument for keeping them as separate operators?
+"""
+answer.answer = "Separate operators allow independent scaling and failure isolation: the join can be allocated more replicas if it becomes the bottleneck, and a bug or slowdown in one operator does not back up into the other except via the explicit bounded channel between them."
+prompt.distractors = [
+    "Fusing operators violates the dataflow model because each operator must be a pure function of one input stream",
+    "Bounded channels are required between every pair of operators in tokio because async tasks cannot share state",
+    "Fused operators cannot be tested independently because their inputs and outputs are interleaved",
+]
+context = """
+The dataflow model does not prohibit operator fusion — Kafka Streams and
+Flink both perform operator fusion as an optimization when it is safe. The
+real question is operational: do you want independent scaling, independent
+metrics, independent failure recovery, and explicit backpressure boundaries
+between these two pieces of logic? For a windowed aggregator + join, the
+answer is almost always yes: their resource profiles differ (window memory
+scales with window size; join memory scales with unmatched events), their
+failure modes differ, and you want the channel between them to be a visible
+boundary in metrics. Fusion is a performance optimization to reach for when
+profiling shows the channel overhead is significant — not a default.
+"""
+
+[[questions]]
+id = "c5f9e3a1-2d8b-4c6e-a9f5-7d1c8e3b2f45"
+type = "MultipleChoice"
+prompt.prompt = """
+Your colleague writes a 'pipeline' as a single async function:
+
+```rust,ignore
+async fn pipeline(mut radar: UdpRadarSource, sink: ChannelSink) -> Result<()> {
+    while let Some(obs) = radar.next().await? {
+        let normalized = normalize(obs);
+        if !validate(&normalized) { continue; }
+        let dedup_state = check_and_update_dedup(&normalized);
+        if dedup_state.is_duplicate { continue; }
+        sink.write(normalized).await?;
+    }
+    Ok(())
+}
+```
+
+Which of the following is the strongest argument for refactoring this into
+multiple operators connected by channels?
+"""
+answer.answer = "Each stage runs at the speed of the slowest downstream stage; the validate and dedup work cannot proceed in parallel with the normalize work, so a single core's worth of work caps total throughput regardless of how many cores are available."
+prompt.distractors = [
+    "tokio cannot vectorize the inner work without explicit channels between operators",
+    "The single function violates Rust's borrow checker because normalized is borrowed immutably and mutably in the same scope",
+    "Sink.write().await is not cancel-safe inside a loop, so the function cannot be cleanly shut down",
+]
+context = """
+The monolithic loop is technically correct but loses the parallelism that
+the dataflow model would buy. With operators connected by channels, normalize
+runs on one task, validate on another, dedup on a third — and tokio schedules
+them across worker threads. While normalize is processing observation N,
+validate can be processing observation N-1, dedup processing observation
+N-2, and the sink is writing observation N-3. The pipeline runs at the
+*max* of any single stage's per-event cost, not the *sum*. With a
+five-stage pipeline this is a 5x throughput difference for free. The other
+answers are wrong: tokio doesn't vectorize independent of channels, the
+borrow checker is fine, and sink.write is cancel-safe.
+"""
