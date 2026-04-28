@@ -1,0 +1,146 @@
+[[questions]]
+id = "ddc4d12c-5a91-4d2f-b13a-bd80c0d1c7c1"
+type = "MultipleChoice"
+prompt.prompt = """
+The optical telescope archive exposes only an HTTP REST endpoint that returns
+the most recent 24 hours of observations. The pipeline must produce fused
+tracks within 30 seconds of an observation being recorded. Which characterization
+of this source is most accurate from the pipeline's perspective?
+"""
+answer.answer = "Unbounded — the pipeline must track which observations it has already consumed and poll for new ones, even though the underlying archive is bounded by retention"
+prompt.distractors = [
+    "Bounded — the pipeline should pull the full 24-hour window on each invocation and deduplicate downstream",
+    "Bounded — the source has a fixed retention window, so it produces a finite dataset on every poll",
+    "Unbounded — the pipeline should request all observations since the start of time on every poll, since HTTP is stateless",
+]
+context = """
+A bounded source can be treated as unbounded, but an unbounded source cannot
+be treated as bounded without introducing artificial cutoffs. The archive
+*produces* observations as they are recorded; the fact that it also exposes
+historical data with a 24-hour retention is incidental. The pipeline must
+maintain a high-water-mark (last-consumed observation) and request only new
+observations. Pulling the full 24-hour window each time would either reprocess
+every observation many times or require deduplication that scales with the
+window size — both worse than tracking a watermark.
+"""
+
+[[questions]]
+id = "f2e30b8a-7d4c-4e8f-9a26-3b1c5e9c8a32"
+type = "MultipleChoice"
+prompt.prompt = """
+A radar source emits frames over UDP at 200 Hz. The downstream correlation
+stage temporarily slows down due to a GC pause in a colocated service. Which
+of these channel-send strategies in the source-side sink is most consistent
+with the dataflow model's backpressure expectations?
+"""
+answer.answer = "tokio::sync::mpsc::Sender::send(obs).await on a bounded channel — the source future is suspended when the channel is full, propagating pressure to the UDP recv"
+prompt.distractors = [
+    "tokio::sync::mpsc::Sender::try_send(obs) and log a warning on Err(Full) — the source keeps reading from the socket and discards observations the downstream cannot keep up with",
+    "Wrap the observation in a tokio::spawn so the send happens in a detached task — the source never blocks on the downstream",
+    "Push to an unbounded VecDeque inside the source and have a separate task drain it to the channel — the source never blocks",
+]
+context = """
+The whole point of awaiting send() on a bounded channel is to push backpressure
+upstream. When the source future is suspended on send(), it is not calling
+recv_from on the UDP socket; the kernel buffer fills, and eventually packets
+are dropped at the kernel level. That is the correct behavior for a UDP source
+under load — the radar will continue producing fresh frames; backlogged frames
+that we cannot process in time are stale anyway. try_send-and-discard at the
+application layer produces the same effect with worse observability. Spawning
+per-observation tasks or buffering into an unbounded queue defeats backpressure
+and produces unbounded memory growth — the silent OOM pattern.
+"""
+
+[[questions]]
+id = "0b8c1f72-9d3e-4f5a-a4d8-6e2c7c5b1a90"
+type = "Tracing"
+prompt.prompt = """
+You are reviewing a colleague's source implementation. They write the
+following sink-side method on the source struct itself:
+
+```rust,ignore
+async fn ingest_loop(&mut self, sink: ChannelSink) {
+    loop {
+        match self.next().await {
+            Ok(Some(obs)) => {
+                let sink = sink.clone();
+                tokio::spawn(async move {
+                    let _ = sink.write(obs).await;
+                });
+            }
+            Ok(None) => break,
+            Err(e) => tracing::error!("source error: {e}"),
+        }
+    }
+}
+```
+
+What is the most serious correctness or operational problem with this loop?
+"""
+answer.answer = "Spawning a task per observation removes backpressure: the source loops as fast as the source produces, regardless of downstream capacity, leading to unbounded task accumulation under load."
+context = """
+The issue is not the error logging or the channel cloning. The bug is that
+sink.write(obs).await — which would have suspended the loop until downstream
+had capacity — has been moved into a detached task. The outer loop now runs
+at the speed of self.next(), which is bound only by the source's wire-protocol
+rate. When downstream is slow, the spawned tasks pile up: each one holds a
+clone of the channel, an Observation, and a tokio task allocation. Memory
+grows linearly with the duration of the slowdown. This is the canonical
+mistake of breaking backpressure by introducing concurrency where sequential
+suspension was the desired behavior.
+"""
+
+[[questions]]
+id = "e7d2c1b5-4a3f-45e8-9b7d-0c8e2f4d6a51"
+type = "MultipleChoice"
+prompt.prompt = """
+The Observation envelope holds both sensor_timestamp (when the sensor recorded
+the event) and ingest_timestamp (when the pipeline received it). A reviewer
+asks: 'These are usually within a few hundred milliseconds. Why carry both?'
+What is the strongest justification for retaining both timestamps in the envelope?
+"""
+answer.answer = "The two timestamps support distinct downstream needs: event-time semantics (windowing, watermarks) require sensor_timestamp; processing-time SLOs and lag metrics require ingest_timestamp. Conflating them blocks both."
+prompt.distractors = [
+    "Carrying both improves data quality scores in lineage tracking by providing redundancy for clock-skew detection",
+    "Some sensors do not emit a timestamp, so ingest_timestamp serves as a fallback when sensor_timestamp is missing",
+    "Storing both lets the system detect when sensors have failed by comparing the two values",
+]
+context = """
+This distinction is load-bearing for Module 3 (event time and watermarks) and
+Module 6 (observability). Sensor_timestamp is what the event 'really' happened
+at — necessary for time-windowing logic to be meaningful. Ingest_timestamp
+is what the pipeline saw — necessary for measuring pipeline lag, SLO compliance,
+and detecting backpressure-induced delays. The two timestamps measure different
+things and serve different purposes; collapsing them to one value makes either
+windowing or lag observation impossible (and which one you lose depends on
+which timestamp you kept).
+"""
+
+[[questions]]
+id = "5f8a2b91-c4e6-47d9-ae5b-1d7c3f8e0b62"
+type = "MultipleChoice"
+prompt.prompt = """
+You are designing the envelope for a new sensor source — a thermal imager
+that produces full 1024x1024 frame buffers at 10 Hz. A teammate proposes
+extending the Observation envelope with an ImageFrame { pixels: Vec<u8> }
+variant of ObservationTarget. Why is this a problematic design choice for
+the SDA Fusion Service envelope?
+"""
+answer.answer = "The envelope is the type passed through every downstream stage; embedding multi-megabyte payloads forces every stage to allocate, buffer, and serialize them whether or not it touches the pixels. The image should be stored separately and the envelope should carry a reference (URI, blob ID) to it."
+prompt.distractors = [
+    "Vec<u8> is heap-allocated, which violates the data-oriented design principles from the Foundation Track",
+    "Image data is binary and cannot be serialized with serde without a custom serializer, breaking the pipeline's wire-format contract",
+    "The thermal imager's output is bounded data, so it does not belong in a streaming pipeline at all",
+]
+context = """
+The envelope-fattening problem is the canonical streaming pipeline anti-pattern:
+adding 'just one more field' to the envelope until every stage pays a per-event
+cost proportional to the largest possible payload. The right pattern is to
+write large blobs to a separate store (object storage, a separate Kafka topic
+with a different retention policy, a shared in-memory cache) and carry a
+reference in the envelope. This decouples envelope size from payload size and
+lets stages that don't need the image avoid touching it. Note also that adding
+this variant changes the size of every Observation in memory due to the sum
+type's discriminant + max-variant size — even radar observations would now
+be sized to hold the largest possible image.
+"""

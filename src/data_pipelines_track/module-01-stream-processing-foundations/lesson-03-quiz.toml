@@ -1,0 +1,158 @@
+[[questions]]
+id = "f4d2e8a1-6c5b-4f9d-87a3-2e1c5b8d3f6a"
+type = "MultipleChoice"
+prompt.prompt = """
+The Maui Optical Site team has agreed to add a notification mechanism to
+their archive: when new observations land, they will POST a webhook to an
+endpoint of your choosing. The current pipeline polls their REST API at
+5-second intervals. The conjunction-detection SLA has tightened from 30
+seconds end-to-end to 5 seconds. Should you adopt the webhook? Why?
+"""
+answer.answer = "Yes for latency, but with caveats: webhook = push, which means the pipeline must accept inbound HTTP, handle the source's retry behavior on delivery failure, and reason about replay semantics if a webhook is missed during a deploy. The latency win is real; the operational complexity is also real."
+prompt.distractors = [
+    "No — polling is the streaming-systems best practice and webhooks are an anti-pattern that introduces unnecessary tight coupling between the producer and consumer",
+    "Yes unconditionally — push is always preferable to poll in a streaming pipeline because it minimizes latency",
+    "No — the 5-second poll interval already provides sub-5-second latency since the average wait is 2.5 seconds",
+]
+context = """
+The right framing is the tradeoff. Push (webhook) buys lower latency and
+eliminates the wasted-poll cost. It also creates new operational obligations:
+inbound HTTP capacity, webhook auth, replay semantics on delivery failure
+(does the source retry? for how long? with what backoff?), and downtime
+behavior (what happens to webhooks during a deploy of the receiver). The
+poll-interval-only argument in the third distractor is wrong: at a 5-second
+interval, average is 2.5s but worst-case is 5s; if a 5s SLA is the bar,
+worst-case matters more than average. The unconditional answers ('always
+preferable', 'always anti-pattern') are wrong on their face — pattern
+choice is contextual.
+"""
+
+[[questions]]
+id = "92e0c7d4-3f5a-4d8b-bc1e-7a2c8f5d1e63"
+type = "MultipleChoice"
+prompt.prompt = """
+Your colleague is building a TCP-based push source for a partner sensor
+network. The wire protocol is documented as 'best-effort, no acknowledgments,
+producer continues to send regardless of consumer state.' What is the most
+important consequence for the source implementation?
+"""
+answer.answer = "TCP-windowing backpressure does not apply: the producer is documented to keep sending regardless. The receiver must implement its own application-level flow control (drop, buffer with bound, or signal back to producer via a side channel)."
+prompt.distractors = [
+    "TCP guarantees in-order delivery, so the source can rely on receiving frames in the order the producer emitted them",
+    "Best-effort delivery means the receiver should implement an acknowledgment protocol to detect missing frames",
+    "The source should use UDP instead, since the producer's behavior is more aligned with UDP's delivery semantics",
+]
+context = """
+The key insight: TCP backpressure (window shrinkage forcing producer-side
+blocking) only works when the producer is *willing to be blocked*. If the
+producer's behavior is 'continue to send regardless,' then either the
+producer is using UDP (despite the 'TCP' label), or it has buffering of its
+own and will drop on its side, or — most likely in practice — the producer
+will hit kernel send-buffer limits and start dropping frames at the producer's
+kernel. None of those map to clean backpressure semantics. The consumer must
+treat this source as effectively unreliable and implement explicit flow
+control, regardless of what wire-protocol class it claims to use. Note that
+switching to UDP doesn't help — the issue is the producer's design, not the
+transport.
+"""
+
+[[questions]]
+id = "0a3c5e7f-8d2b-4f1a-9c4e-6b8d1f3a5c20"
+type = "Tracing"
+prompt.prompt = """
+Read this `next()` implementation for a polling source. Identify the most
+serious operational problem with it:
+
+```rust,ignore
+async fn next(&mut self) -> Result<Option<Observation>> {
+    sleep(self.poll_interval).await;
+    let resp = self.client
+        .get(&self.endpoint)
+        .send()
+        .await?
+        .json::<Vec<Record>>()
+        .await?;
+    let first = resp.first()
+        .ok_or_else(|| anyhow::anyhow!("empty response"))?;
+    Ok(Some(self.to_observation(first)))
+}
+```
+"""
+answer.answer = "Two related problems: (1) it does not track a high-water-mark so it reprocesses the same records on every poll, and (2) it returns Err on empty responses instead of looping or sleeping again, which propagates as an error to the orchestrator instead of an idle state."
+context = """
+This implementation has multiple defects. The most operationally serious
+is the lack of a watermark — every poll requests all records, so the same
+observations are emitted on every cycle. Downstream systems will see massive
+duplication. Second, an empty response is treated as an error, but it is
+the *normal* response when no new data exists; the source should sleep and
+poll again. Third (less serious): it discards all records after the first,
+which means the source is broken for any non-trivial response. These are
+all classic 'first-attempt polling source' bugs. Fixed implementations
+maintain a watermark (since-timestamp), buffer multi-record responses, and
+treat empty as a non-error idle state.
+"""
+
+[[questions]]
+id = "5e9a1b3d-7c4f-4e8a-b2d6-9f1c3e5a8b04"
+type = "MultipleChoice"
+prompt.prompt = """
+The ISL beacon protocol exposes only a 'GET /current_state' endpoint that
+returns the most recent state vector for a single satellite. There is no
+notification mechanism, no batch endpoint, no since-timestamp parameter,
+and no long-polling support. Each satellite emits a fresh state at 1 Hz.
+The constellation has 48 satellites. Which design best balances correctness
+with operational cost?
+"""
+answer.answer = "One source task per satellite, each polling its own /current_state every ~500 ms (sub-second to avoid missing updates), with deduplication on (satellite_id, sensor_timestamp_ns) downstream to drop the inevitable duplicates"
+prompt.distractors = [
+    "One source task that polls all 48 satellites in a round-robin every 1 second, since the beacon emits at 1 Hz",
+    "Forty-eight source tasks each polling at exactly 1 Hz aligned with the beacon emission cycle",
+    "One source task that polls all 48 satellites concurrently every 5 seconds and accepts the latency",
+]
+context = """
+The beacon emits at 1 Hz with no since-timestamp support. Polling at exactly
+1 Hz risks aliasing — the poll and the emission are independent clocks; if
+they drift, you may consistently miss updates or consistently double-fetch.
+Polling slightly faster than the emission rate (~500ms here) ensures you
+catch every state, at the cost of seeing each state ~2 times. Deduplication
+on (satellite_id, sensor_timestamp_ns) handles the duplicates cheaply.
+Round-robin across 48 satellites at 1Hz means each satellite is polled every
+~21ms — wasteful. 48 tasks at exactly 1Hz suffer the aliasing problem above.
+5-second polling doesn't meet 'continuous beacon stream' expectations and
+may not satisfy a sub-30-second conjunction SLA. The Nyquist-style insight —
+sample faster than the source emits, then dedupe — is a common pattern when
+the source is poll-only and stateless.
+"""
+
+[[questions]]
+id = "c6f2e9a4-1b8d-4e7c-bf5a-2d9c1e3f7a08"
+type = "MultipleChoice"
+prompt.prompt = """
+A push source over TCP is connected to a downstream pipeline whose first
+stage runs at 80% of the source's wire rate under normal load. The
+implementation reads frames synchronously and forwards them via
+`tokio::sync::mpsc::Sender::send().await` on a 1024-buffer channel. After
+12 minutes of operation, the channel is consistently 90-100% full. What is
+happening at the kernel level on the TCP socket, and what is the operational
+implication?
+"""
+answer.answer = "The application's read rate is now bounded by the downstream's processing rate. The kernel TCP receive buffer fills, the kernel-advertised window shrinks, the producer's TCP stack receives smaller window updates, and the producer's writes start to block at the producer's syscall layer. End-to-end backpressure is working as designed."
+prompt.distractors = [
+    "The kernel is silently dropping incoming packets to prevent buffer overflow; the source will appear to work but is losing data",
+    "TCP retransmits dropped segments transparently, so no data is lost, but throughput drops to match the producer's retransmit rate",
+    "The application must call setsockopt to enlarge the receive buffer or risk connection termination by the kernel after the buffer fills",
+]
+context = """
+This is the textbook TCP-windowing-as-backpressure scenario, and it's the
+specific behavior the lesson promises 'free' from synchronous reads with
+backpressure-aware sinks. When the channel is full, send().await suspends.
+The application doesn't read. The kernel buffer fills. TCP's flow control
+mechanism (window updates) communicates the receiver's reduced capacity to
+the sender. The sender slows down. No data is lost, no connection is
+dropped — the producer just produces less. This is the correct outcome,
+and it requires no application code beyond the synchronous read pattern
+the lesson advocates. The wrong answers reflect common misunderstandings:
+TCP doesn't drop user data (that's UDP), retransmits don't apply to packets
+that were never accepted, and kernels don't terminate connections for
+buffer pressure (only for explicit timeouts or RST).
+"""
