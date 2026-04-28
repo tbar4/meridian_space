@@ -485,4 +485,4 @@ Key decisions in this code: the `Drop` impl handles synchronous cleanup, which i
 
 ---
 
-{{#quiz module1-lesson-03-quiz.toml}}
+{{#quiz lesson-03-quiz.toml}}

@@ -273,4 +273,4 @@ async fn main() -> Result<()> {
 
 ---
 
-{{#quiz module1-lesson-01-quiz.toml}}
+{{#quiz lesson-01-quiz.toml}}
