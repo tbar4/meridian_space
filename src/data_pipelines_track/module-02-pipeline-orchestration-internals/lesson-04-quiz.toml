@@ -1,0 +1,199 @@
+[[questions]]
+id = "59ba158c-ead6-4b60-81a1-cbea12e636a6"
+type = "MultipleChoice"
+prompt.prompt = """
+The validate operator added in last week's release uses `unwrap()` on a
+catalog cache lookup that occasionally returns None (during a cache
+warming race). The unwrap panics. What is the operational consequence
+in the version of the orchestrator that has no supervisor wired in,
+and what does the supervisor pattern from this lesson change?
+"""
+answer.answer = "Without a supervisor, the panicked task is torn down by the runtime; its incoming channel fills (its upstream is blocked on send) and its outgoing channel goes silent (no observations flow downstream). The pipeline appears to be running but is producing alerts only on the data path that bypasses validate, with no signal that anything is wrong beyond log noise. With the supervisor, the JoinHandle's panic surfaces through JoinSet::join_next as TaskExit::Panicked, the supervisor returns SupervisorEvent::Panicked, and the orchestrator's top-level entrypoint tears down the pipeline cleanly so the panic is escalated to operations rather than silently masked."
+prompt.distractors = [
+    "Without a supervisor, Tokio's default panic handler aborts the entire process; the supervisor pattern only adds a chance to log the panic before exit",
+    "Without a supervisor, the panicked task is automatically restarted by the Tokio runtime up to 3 times before the runtime gives up; the supervisor adds explicit policy on top of this default",
+    "Without a supervisor, the panic propagates synchronously through the channels to upstream operators, panicking each in turn; the supervisor breaks this propagation by catching the panic at task boundaries",
+]
+context = """
+This is the canonical 'silent panic' failure mode and the reason the
+lesson insists every JoinHandle be supervised. The default Tokio
+behavior on panic is 'capture and continue': the task disappears, the
+runtime keeps polling other tasks, and the application has no signal
+unless someone is awaiting the handle. The validate operator's incoming
+channel is now orphaned; its upstream's send().await never returns; the
+upstream is blocked. The pipeline runs but the validate stage is gone.
+The supervisor structurally fixes this by owning every handle through
+JoinSet and dispatching on TaskExit. Tokio does not auto-restart, does
+not auto-abort the process (unless explicitly configured), and does not
+propagate panics through channels — channels are typed Result<()>
+return paths, not panic conduits.
+"""
+
+[[questions]]
+id = "ebd5b79b-16ed-45ee-855c-cd5bf2b79418"
+type = "MultipleChoice"
+prompt.prompt = """
+A teammate proposes RestartPolicy::Always for every operator on the
+grounds that 'every failure is transient if you retry enough times.'
+Why does the lesson reject this in favor of bounded restart budgets?
+"""
+answer.answer = "An operator that panics on its first input panics again on the same input after restart, and again, and again — a tight restart loop that consumes the operator's worker thread without producing any output. RestartPolicy::Always with no budget produces a CPU-burning loop that masks the underlying bug and floods metrics with restart events. The bounded budget caps the loop and escalates to operations once the threshold is breached, surfacing the bug for diagnosis rather than papering over it."
+prompt.distractors = [
+    "RestartPolicy::Always violates Tokio's structured concurrency rules; the JoinSet refuses to accept the same factory key after the first failure to prevent state leakage",
+    "RestartPolicy::Always requires the operator to be stateless; stateful operators (windowed dedup, correlator) lose their state on restart, so Always is incorrect for them and Bounded is required",
+    "Continuous restarts trigger the runtime's panic-storm protection, which aborts the entire process after 100 restarts in 10 seconds; the bounded budget avoids triggering that protection",
+]
+context = """
+The bounded budget is about distinguishing transient failures (a
+network blip, a database leader election) from deterministic failures
+(a programming bug like the unwrap on None). Transient failures retry
+into success; deterministic failures retry into the same failure. The
+budget cap turns the latter into a clean escalation rather than an
+infinite loop. The Erlang-style '5 restarts in 60 seconds' default is
+sized to handle a few short blips while catching deterministic bugs
+quickly. The distractor about stateful operators is reasonable but
+unrelated to the budget question (stateful operators recover state via
+checkpointing, Module 5; their restart budget is a separate dimension).
+The distractors about Tokio internals are invented — there is no
+'panic-storm protection' or 'JoinSet factory key' mechanism.
+"""
+
+[[questions]]
+id = "0e02b8c2-f3c6-4a95-b0c9-133ea8014246"
+type = "MultipleChoice"
+prompt.prompt = """
+The orbital propagator is CPU-bound at 2-4ms per call and runs at
+several hundred calls per second under steady load. The audit sink writes
+to local disk and uses spawn_blocking for the synchronous file I/O.
+During fragmentation-event surges, audit-sink writes spike up by 10x.
+Operations reports that the audit sink's P99 latency rises from 3ms to
+800ms during these surges, even though disk I/O bandwidth is well under
+its limit. What is the most likely cause, and what does the lesson
+recommend?
+"""
+answer.answer = "The audit sink's spawn_blocking calls are competing for slots in the default Tokio blocking pool with the propagator's spawn_blocking calls. Under surge load, the propagator saturates the pool's 512 default threads, forcing audit-sink calls to wait in the pool's queue. The recommended fix is runtime-level bulkheading: give the propagator its own dedicated tokio::runtime::Runtime with its own blocking pool, isolating it from the audit sink's pool slots."
+prompt.distractors = [
+    "The audit sink's mpsc channel buffer is full because of the surge; backpressure causes upstream operators to slow, which shows up at the sink as elevated apparent latency. The fix is a larger channel buffer",
+    "The disk's write cache is being flushed by the OS during the surge, blocking the audit sink's writev calls. The fix is to call fdatasync less aggressively in the audit path",
+    "The propagator's Result<PropagatedObservation> is moved between the propagator's blocking task and the operator's async context; under surge load this move becomes the bottleneck. The fix is to use Arc<PropagatedObservation> to avoid the move",
+]
+context = """
+This is the textbook runtime-level bulkheading scenario. The default
+Tokio runtime has a single blocking pool shared by every spawn_blocking
+call in the process. Two operators that each individually fit fine in
+the pool can conflict when their peak loads overlap. The propagator's
+surge consumes pool slots that would otherwise be available for the
+audit sink; the audit sink's calls queue in the pool's internal queue,
+and the queue wait shows up as latency. The fix is to give the
+propagator its own runtime with its own blocking pool, so the two
+operators have independent pool capacity. Channel-level bulkheading
+(distractor 1) does not help because the resource being exhausted is
+not the channel; it is the blocking pool. The disk-flush distractor
+(2) is plausible-sounding but the question states disk bandwidth is
+fine. The Arc distractor (3) is fictional — the move cost is sub-microsecond
+and not the bottleneck.
+"""
+
+[[questions]]
+id = "76b4c5a8-63ad-4071-a243-dd83b4cfe731"
+type = "Tracing"
+prompt.program = """
+// Simulate the circuit breaker's state evolution over a sequence
+// of outcomes, with the threshold and minimum-sample logic from the
+// lesson. State and history are pure synchronous; we step through
+// outcomes manually and print state transitions.
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
+enum State { Closed, Open, HalfOpen }
+
+fn step(state: State, history: &mut Vec<bool>, was_failure: bool, threshold: f32) -> State {
+    history.push(was_failure);
+    let total = history.len();
+    let failures = history.iter().filter(|&&f| f).count();
+    let rate = if total == 0 { 0.0 } else { failures as f32 / total as f32 };
+    match state {
+        State::Closed => {
+            if total >= 5 && rate >= threshold {
+                State::Open
+            } else {
+                State::Closed
+            }
+        }
+        State::HalfOpen => {
+            if was_failure { State::Open } else { State::Closed }
+        }
+        State::Open => State::Open,
+    }
+}
+
+fn main() {
+    let threshold = 0.5_f32;
+    let mut state = State::Closed;
+    let mut history: Vec<bool> = Vec::new();
+    // Outcome sequence: 4 failures, 1 success, then 2 failures.
+    let outcomes = [true, true, true, true, false, true, true];
+    for (i, &outcome) in outcomes.iter().enumerate() {
+        state = step(state, &mut history, outcome, threshold);
+        println!("step={} outcome={} state={:?}", i + 1, outcome, state);
+    }
+}
+"""
+answer.doesCompile = true
+answer.stdout = """step=1 outcome=true state=Closed
+step=2 outcome=true state=Closed
+step=3 outcome=true state=Closed
+step=4 outcome=true state=Closed
+step=5 outcome=false state=Open
+step=6 outcome=true state=Open
+step=7 outcome=true state=Open"""
+context = """
+The breaker stays Closed until two conditions hold simultaneously: at
+least 5 samples in the window AND failure rate at or above the threshold.
+Steps 1-4: outcomes are all failures, but total < 5, so the minimum-sample
+floor prevents tripping. The breaker stays Closed even at 100% failure
+rate. Step 5: a success arrives, but it is the 5th sample. history is now
+[T,T,T,T,F], total=5, failures=4, rate=0.8 ≥ 0.5. Both conditions hold,
+so the breaker trips to Open on a step whose outcome was itself a
+success. This is the lesson's point: the breaker reacts to the *pattern*
+in the recent window, not to the most recent call's outcome alone. Step
+6 and 7 stay Open per the Open arm of the match. (The half-open
+transition would happen after a cooldown period, which this trace does
+not simulate.) The minimum-sample floor is what prevents the breaker
+from tripping on the first or second failure during operator startup
+when the sample is too small to be statistically meaningful.
+"""
+
+[[questions]]
+id = "934a33fc-aff6-4324-aeea-441f4f277dd8"
+type = "MultipleChoice"
+prompt.prompt = """
+The conjunction-emitter operator has a 200ms deadline budget per
+observation (it must emit alerts within 200ms of receiving the
+correlated risk envelope, per the SDA SLA). Operations notices the
+emitter is timing out frequently, but its own per-event work measures
+under 5ms in isolation. Tracing reveals that the upstream correlator's
+output channel is consistently 95-100% full. A teammate proposes adding
+retries to the emitter to handle the timeouts. Why is this the wrong fix?
+"""
+answer.answer = "The emitter is not the failing operator. Its timeouts are a symptom of the correlator's slowness — the channel-full condition means the correlator is slow to produce, and the emitter is starving for input. Retries on the emitter cannot help (there is no input to retry processing); they would just produce a metrics noise pattern that makes the actual cause harder to see. The fix addresses the correlator: scale it out (more replicas), profile it for hotspots, or apply load-shedding upstream of it. The principle is the lesson's: address the cause, not the symptom."
+prompt.distractors = [
+    "Retries on the emitter would help in principle but the SLA budget of 200ms is too tight to allow even one retry; the right fix is to extend the SLA to 500ms to absorb the variance",
+    "Retries are correct here, but the emitter is configured with no jitter; adding decorrelated jitter to the retries would resolve the timeouts within the existing SLA budget",
+    "Retries on the emitter would mask the correlator's contention because the retries fire on a different schedule than the correlator's output, breaking the channel's FIFO ordering and producing out-of-order alerts",
+]
+context = """
+This is the cascading-failure scenario the lesson described. The
+operator that appears to be failing (the emitter, with its timeout
+metric) is downstream of the actual problem (the correlator). Diagnostic
+discipline: when an operator is timing out, look at its upstream's
+channel occupancy. A persistently full channel upstream means the
+operator is starving, not failing. Retries do not help an operator that
+has no input to retry on. The fix is to address the bottleneck operator
+itself, which in this case is the correlator. The distractors invent
+unrelated complications: extending the SLA papers over the cause; adding
+jitter only matters for retry storms; FIFO channels do not get broken
+by retry timing. Module 6's observability stack makes the channel-occupancy
+diagnostic visible on the dashboard so this kind of cascade is recognized
+in seconds, not minutes.
+"""
