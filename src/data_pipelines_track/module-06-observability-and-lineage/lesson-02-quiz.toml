@@ -1,0 +1,231 @@
+[[questions]]
+id = "12bd2e82-e21e-4295-9b38-abec20b6f0a3"
+type = "MultipleChoice"
+prompt.prompt = """
+A teammate proposes carrying full lineage on every event without
+sampling, on the grounds that 'storage is cheap and we want every
+event traceable.' For SDA's pipeline at 10K events/sec across a
+10-stage pipeline with average fan-in of 2, what does the lesson's
+storage-cost framing predict, and why is sampling at 1% the
+recommended default?
+"""
+answer.answer = "The full-lineage cost is 2^10 = 1024 ancestor IDs per output event (the doubling at each stage's fan-in), times ~16 bytes per UUID plus per-step metadata, times 10K events/sec — roughly 17 GB/sec of lineage data. That dwarfs the actual observation payload by orders of magnitude and is unsustainable at SDA's scale. 1% sampling cuts the volume by 100x to ~170 MB/sec, which is comfortably within typical pipeline budgets. Investigations using sampled lineage have hundreds of lineage-bearing events per minute to query, more than enough for the diagnostic use cases. The lesson's pattern: full lineage is a footgun at production volume; sampling makes lineage operational without breaking the storage budget."
+prompt.distractors = [
+    "Full lineage is fine because the lineage payload compresses well — Brotli at level 11 typically achieves 50:1 compression on lineage data, bringing the 17 GB/sec down to under 350 MB/sec, which is sustainable",
+    "Sampling at 1% defeats the purpose of lineage because 99% of events are untraceable. The right approach is full lineage with truncation at depth 5 — events past 5 stages drop their oldest steps",
+    "The 17 GB/sec estimate is wrong because most pipeline stages are stateless map operators that don't fan in; lineage size grows by 1 (not by 2x) at each step. The actual full-lineage cost is closer to 100 MB/sec",
+]
+context = """
+The exponential-growth framing is the lesson's specific argument.
+Pipelines with fan-in (joins, aggregations like the windowed
+correlator) double the lineage at each step, and a 10-stage pipeline
+with average fan-in of 2 produces 1024-ancestor outputs at the sink.
+Sampling cuts the cost proportional to the rate; truncation cuts it
+per-event but loses some diagnostic detail. The compression
+distractor is wrong about achievable rates (50:1 on UUIDs is not
+realistic) and misses the point that the cost is in the data
+movement and storage, not just bytes-on-disk. The 'sampling defeats
+lineage' answer reverses the lesson's framing: 1% sampling preserves
+the diagnostic capability at acceptable cost; the alternative is
+no lineage, which is strictly worse. The 'fan-in is rare' answer is
+true for some pipelines but the SDA correlator IS a fan-in
+operator, and the lesson assumes representative volumes, not
+best-case ones.
+"""
+
+[[questions]]
+id = "d8d21b67-c2ed-429a-a900-7b23f770733d"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson's LineageSampler uses a deterministic hash of the
+observation_id rather than a random number generator. Why does the
+lesson recommend deterministic over random sampling?
+"""
+answer.answer = "Deterministic hash sampling produces reproducible decisions across replicas and across time. The same observation_id always gets the same sample/no-sample answer, so an investigation that queries 'is event X in the lineage corpus?' returns a deterministic answer regardless of which replica processed X or when. Random sampling produces a different decision per call; debugging a specific event becomes a flip-of-a-coin on whether its lineage was captured. The reproducibility is what makes the sampling operationally useful for incident investigation."
+prompt.distractors = [
+    "Hash sampling is faster than random sampling because it avoids the syscalls that the OS RNG (`/dev/urandom`) requires. The 100-nanosecond difference per event compounds to noticeable throughput gain at SDA's scale",
+    "Hash sampling produces a more uniform distribution than random sampling because the hash function is injective. Random sampling has clustering effects that produce non-uniform sampling at small windows",
+    "Hash sampling is required by Prometheus's metric-export protocol; the metrics endpoint exposes the hash decision as a metric label, which random decisions cannot represent",
+]
+context = """
+The reproducibility argument is the operational point. Investigation
+of a specific event_id should give the same answer every time
+('this event was sampled and its lineage is in the corpus' or 'this
+event was not sampled'); random sampling produces a different
+answer per call, which is unworkable. The other distractors invent
+unrelated properties: random sampling is fast enough (the OS RNG is
+microseconds, not the bottleneck); hash functions are not injective
+(they are not 1-to-1) but their output distribution is uniform under
+typical hash choices, same as a good RNG; Prometheus has no such
+requirement on sampling decisions. The lesson's framing is direct:
+sampling is fine, but make it reproducible.
+"""
+
+[[questions]]
+id = "b51d8f5e-d2b2-4355-aa63-5a3a8febc3e4"
+type = "Tracing"
+prompt.program = """
+// Walk a small lineage trace backward and forward.
+// We have 3 events. event_3 was produced by an operator from event_1
+// and event_2. Each event's lineage records the operators that touched
+// it and the parent IDs at each step.
+
+use std::collections::{HashMap, HashSet};
+
+#[derive(Debug, Clone)]
+struct LineageStep {
+    operator: &'static str,
+    parents: Vec<u32>,  // event ids
+}
+
+#[derive(Debug, Clone)]
+struct Trace {
+    steps: Vec<LineageStep>,
+}
+
+impl Trace {
+    fn ancestors(&self) -> HashSet<u32> {
+        let mut s = HashSet::new();
+        for step in &self.steps { for p in &step.parents { s.insert(*p); } }
+        s
+    }
+}
+
+fn main() {
+    // event_1: a radar observation. Lineage: just its own UDP frame at the source.
+    let trace_1 = Trace { steps: vec![
+        LineageStep { operator: "radar-source", parents: vec![1] },
+    ]};
+    // event_2: an optical observation.
+    let trace_2 = Trace { steps: vec![
+        LineageStep { operator: "optical-source", parents: vec![2] },
+    ]};
+    // event_3: a ConjunctionRisk produced by the correlator from
+    // event_1 and event_2. Lineage merges both upstream traces.
+    let trace_3 = {
+        let mut steps: Vec<LineageStep> = Vec::new();
+        steps.extend(trace_1.steps.clone());
+        steps.extend(trace_2.steps.clone());
+        steps.push(LineageStep { operator: "correlator", parents: vec![1, 2] });
+        Trace { steps }
+    };
+
+    // Build a forward index: parent_id -> events that have it as an ancestor.
+    let traces: HashMap<u32, Trace> = vec![
+        (1, trace_1.clone()),
+        (2, trace_2.clone()),
+        (3, trace_3.clone()),
+    ].into_iter().collect();
+    let mut forward: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (event_id, trace) in &traces {
+        for anc in trace.ancestors() {
+            forward.entry(anc).or_default().push(*event_id);
+        }
+    }
+    // For deterministic output, sort the forward-index lists.
+    for v in forward.values_mut() { v.sort(); }
+
+    // Backward query: what is event_3's lineage?
+    let bk: Vec<&str> = traces[&3].steps.iter().map(|s| s.operator).collect();
+    println!("backward(3) operators={:?}", bk);
+    let mut anc_3: Vec<u32> = traces[&3].ancestors().into_iter().collect();
+    anc_3.sort();
+    println!("backward(3) ancestors={:?}", anc_3);
+
+    // Forward query: which events have event_id=2 as an ancestor?
+    let mut affected = forward.get(&2).cloned().unwrap_or_default();
+    affected.sort();
+    println!("forward(2) affected={:?}", affected);
+}
+"""
+answer.doesCompile = true
+answer.stdout = """backward(3) operators=["radar-source", "optical-source", "correlator"]
+backward(3) ancestors=[1, 2]
+forward(2) affected=[2, 3]"""
+context = """
+The trace exercises both query directions on a small 3-event graph.
+
+Backward walk on event 3: the trace's steps list the three operators
+that touched the path — radar-source, optical-source (from the merged
+parent traces), and correlator (from the correlator's own append).
+The ancestors set collects parent IDs from every step: {1, 2}.
+Sorted output: [1, 2].
+
+Forward walk on event_id=2 (the optical observation): the forward
+index returns every event whose lineage includes 2. Event 2 itself
+includes itself (since trace_2 has a step listing parents=[2]) and
+event 3 (which merged trace_2's history into its own). Sorted output:
+[2, 3].
+
+The pedagogical point: backward is for 'what produced this' (which
+inputs contributed to event 3?), forward is for 'what does this
+affect' (which downstream events depend on event 2?). Both queries
+are O(1) given a precomputed forward index; the precomputation is
+done at load time. Production tooling builds these indices in a
+graph database; the trace shows the algorithm at the small scale.
+"""
+
+[[questions]]
+id = "946bd9de-273a-4d43-81d1-042af0b45920"
+type = "MultipleChoice"
+prompt.prompt = """
+A radar later found to have a calibration bug between 14:00-15:00
+yesterday produced ~6,000 observations during that window. The pipeline
+emitted ~80 conjunction alerts during the same window. The on-call
+engineer needs to identify which of those 80 alerts depended on the
+buggy radar's data so the alert subscriber can invalidate them. Which
+lineage query direction does this require, and what is the operational
+shape?
+"""
+answer.answer = "Forward walk: given the 6,000 buggy observations as known-bad inputs, find every output event (alerts) whose lineage includes any of them. The lineage store's forward_index supports this in O(K) where K is the number of affected outputs; for the SDA case the result is 'these specific N alerts of the 80 are affected.' The on-call engineer hands the list to the alert subscriber's owner who invalidates them in their system. Without the forward index this query would scan every event's full lineage in the corpus, which is O(events × lineage_depth) and slow."
+prompt.distractors = [
+    "Backward walk: walk each of the 80 alerts' lineage backward and check whether any of the buggy radar's IDs appear. This works but takes O(80 × lineage_depth) — slower than the forward walk but easier to implement",
+    "The query requires both walks executed in parallel: backward from each alert and forward from each buggy observation, with the intersection being the affected set. Either alone is insufficient because lineage is bidirectional",
+    "Lineage cannot answer this question because the buggy observations were not flagged as bad at emission time; the lineage store would need to be re-walked with the bad-input list as a filter, which the standard tools do not support",
+]
+context = """
+The forward walk is the canonical impact-assessment query. The
+forward index is built specifically to answer 'what depends on this
+input' in O(K). Walking backward from every alert (the first
+distractor) does work but is O(N × depth) instead of O(K), and at
+production scale the difference matters. The 'both walks in parallel'
+answer over-engineers a simpler query. The 'lineage cannot answer'
+answer is wrong: the lineage store has no concept of 'flagged at
+emission'; it stores ancestor relationships, and the impact query
+filters those relationships against a given set of bad-input IDs.
+The lesson's pattern: forward walk for impact assessment, backward
+walk for post-incident analysis, both supported by the same lineage
+data with different index shapes.
+"""
+
+[[questions]]
+id = "369deb02-224b-4adb-a5d5-c63ed25f005b"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson notes that OpenLineage is the production cross-system
+standard for lineage and that the in-envelope lineage from the lesson
+is for per-event traceability. A teammate asks: 'why have both? Why
+not just emit OpenLineage events for everything and skip the
+in-envelope shape?'
+"""
+answer.answer = "OpenLineage operates at the *dataset and job* level — it describes which datasets a job consumes and produces, not the per-event ancestry within a single dataset. For the SDA pipeline's diagnostic case ('which observations contributed to alert 1234?'), per-event ancestry is what is needed; OpenLineage by itself does not answer this. The two are complementary: in-envelope lineage for per-event investigation; OpenLineage for cross-pipeline graph navigation showing which jobs and datasets feed which others. Production tooling typically uses both, with the in-envelope lineage feeding into a per-event store while OpenLineage feeds into a dataset-level browser."
+prompt.distractors = [
+    "OpenLineage is the future and in-envelope lineage is the legacy approach. The lesson recommends in-envelope only as a transition mechanism while OpenLineage tooling matures; new systems should use OpenLineage exclusively",
+    "OpenLineage is too verbose to emit on the per-event hot path; it produces ~5KB events per emission. In-envelope lineage's binary format is the production efficient version, OpenLineage is for the dashboard side only",
+    "OpenLineage cannot represent fan-in correctly — its data model assumes one input dataset per job, which the windowed correlator (with 2-N input observations) violates. In-envelope lineage handles fan-in via parent_ids lists",
+]
+context = """
+The granularity argument is the right answer. OpenLineage and
+in-envelope lineage operate at different abstraction levels: dataset
+and job for OpenLineage, individual events for in-envelope. The two
+serve different operational questions and are complementary, not
+substitutable. The 'OpenLineage is the future' answer reverses the
+lesson's framing — both are part of the future, neither replaces
+the other. The 'too verbose' distractor inverts the cost picture
+(OpenLineage events are typically emitted at job-completion time,
+not per-event; volume is comparable to job logs). The 'cannot
+represent fan-in' answer is invented (OpenLineage handles multi-
+input jobs via the inputs field on Job events). The lesson's
+discipline: choose the lineage abstraction that matches the
+operational question; both have their place.
+"""
