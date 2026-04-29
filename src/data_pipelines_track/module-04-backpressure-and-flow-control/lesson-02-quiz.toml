@@ -1,0 +1,198 @@
+[[questions]]
+id = "2e4bce56-5baf-4dd8-96ca-0f91eba65cda"
+type = "MultipleChoice"
+prompt.prompt = """
+A teammate proposes implementing every operator-pair edge in the SDA
+pipeline as a credit-based channel rather than the bounded-channel-plus-
+await pattern from M2 and Lesson 1, on the grounds that 'credits are a
+strict generalization, so they cannot be worse and might be better.'
+What is the strongest objection the lesson makes?
+"""
+answer.answer = "Credit-based flow has more coordination overhead — a separate channel, per-sender credit counters, explicit credit-return on every processed item, the CreditHandle drop-warning machinery. For the steady-state operator-pair edge where backpressure-via-await is sufficient, the additional surface area is operational cost without functional benefit. The lesson recommends credit-based specifically for cases where the decoupling between credit signal and data channel is needed (checkpoint flushes, cross-runtime edges, graceful drains); using it everywhere else adds complexity that does not pay back."
+prompt.distractors = [
+    "Credit-based channels cannot interoperate with the OperatorGraph builder from M2 because the builder assumes single-channel edges; using credits everywhere would require rewriting the orchestrator API",
+    "Credit-based channels have higher per-event latency because the credit counter check is on the hot path; benchmarks show ~30% throughput degradation versus bounded-channel-plus-await",
+    "Credit-based channels do not propagate watermarks (Module 3) correctly because the credit return channel is unidirectional; watermark fan-in requires bidirectional flow that credits cannot express",
+]
+context = """
+The complexity-without-benefit framing is the right answer. Both
+mechanisms produce identical steady-state behavior for normal operator
+edges; the difference is real only when the receiver needs to pause
+without occupying a slot. Reaching for the heavier mechanism by default
+adds maintenance cost and an additional moving part that ops must
+understand. The other distractors invent constraints that don't exist
+(the OperatorGraph could be extended cleanly; the per-event latency is
+single-digit nanoseconds, not 30%; watermarks flow on the data channel
+in either pattern). The lesson's framing is precise: choose the
+mechanism that fits the problem, prefer the simpler default, reach for
+credits where the decoupling is the operational point.
+"""
+
+[[questions]]
+id = "7307520f-00cb-4dc3-a268-b42581ba54be"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson's CreditChannel implementation has the receiver call
+`credit.return_credit()` AFTER it has finished processing the item.
+A teammate refactors the receiver loop to call return_credit BEFORE
+processing, arguing 'this gets the upstream moving sooner.' What
+property does this break?
+"""
+answer.answer = "It breaks the in-flight-bounded invariant. With after-processing return, the maximum number of items 'in flight' at the operator is exactly the initial credit grant: at any moment, that many items are either in the data channel or being processed. With before-processing return, the upstream sees the credit and fires the next item *while the current item is still being processed*, so the actual in-flight count is grant + 1 (one being processed, grant in the data channel). The invariant the credit grant was supposed to bound — 'at most N items in flight' — is no longer true."
+prompt.distractors = [
+    "It breaks cancel-safety: the return_credit await is inside the recv loop, and reordering it before processing creates a path where the future can be dropped between credit-return and processing-completion, leaving the upstream with credits but no consumer",
+    "It breaks ordering: the data and credit channels are independent FIFO queues, and returning the credit before sending downstream causes the credit to arrive at the upstream before the upstream's previous item has reached the downstream operator",
+    "It breaks the watermark protocol from Module 3: watermark items embedded in the data stream require a credit each, and returning credits early causes watermarks to be propagated faster than the data they bound",
+]
+context = """
+The in-flight-bound is the structural property that credits exist to
+provide. If the bound matters (and the lesson identifies several cases
+where it does — checkpoint flushes, cross-runtime edges, graceful
+drains), then the AFTER ordering is what enforces it. The cancel-
+safety distractor invents a problem that does not exist (the recv
+loop's structure is fine in either ordering). The ordering distractor
+confuses two unrelated FIFO properties. The watermark distractor
+inverts the relationship (watermarks are control items that flow on
+the data channel like any other item). The lesson's observation is
+direct: the AFTER ordering is what makes the bound true; reordering
+breaks the bound; the rest of the cases that depend on the bound
+silently start having different behavior.
+"""
+
+[[questions]]
+id = "cbf26407-e130-425d-9b60-9650b54a6b92"
+type = "Tracing"
+prompt.program = """
+// Simulate a credit-based sender's local credit counter under a
+// sequence of operations. Each operation is either:
+//   Send  - sender wants to send; if credits > 0 decrement and report,
+//           else report 'blocked'.
+//   Return(n) - n credits returned from the receiver, increment counter.
+// Initial credit grant: 3.
+
+#[derive(Debug)]
+enum Op { Send, Return(u32) }
+
+fn main() {
+    let mut credits: u32 = 3;
+    let ops = [
+        Op::Send,
+        Op::Send,
+        Op::Send,
+        Op::Send,
+        Op::Return(2),
+        Op::Send,
+        Op::Send,
+        Op::Send,
+        Op::Return(1),
+    ];
+    for (i, op) in ops.iter().enumerate() {
+        let action: String = match op {
+            Op::Send => {
+                if credits > 0 {
+                    credits -= 1;
+                    format!("send_ok credits={}", credits)
+                } else {
+                    "send_blocked".to_string()
+                }
+            }
+            Op::Return(n) => {
+                credits += n;
+                format!("return({}) credits={}", n, credits)
+            }
+        };
+        println!("op={} {:?} -> {}", i + 1, op, action);
+    }
+}
+"""
+answer.doesCompile = true
+answer.stdout = """op=1 Send -> send_ok credits=2
+op=2 Send -> send_ok credits=1
+op=3 Send -> send_ok credits=0
+op=4 Send -> send_blocked
+op=5 Return(2) -> return(2) credits=2
+op=6 Send -> send_ok credits=1
+op=7 Send -> send_ok credits=0
+op=8 Send -> send_blocked
+op=9 Return(1) -> return(1) credits=1"""
+context = """
+Trace step-by-step. Initial credits=3. Op 1-3: each Send decrements;
+credits go 3→2→1→0. Op 4: Send finds credits=0, blocks (in real code
+the sender would await on the credit-return channel; here we just
+report the block). Op 5: Return(2) increments credits to 2. Op 6-7:
+Sends decrement credits to 1, then 0. Op 8: Send blocks again. Op 9:
+Return(1) brings credits to 1. The trace shows the canonical credit-
+based flow: bursts of sends drain the counter; the upstream stops
+when the counter hits zero; credit returns from the receiver replenish
+the counter and unblock further sends. The receiver's control over
+the counter (when and how many credits to return) is what gives it
+the explicit pause-without-buffering property the lesson promises.
+"""
+
+[[questions]]
+id = "09a4068d-16d5-43a3-9bad-f5b80563cdf0"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson's CreditHandle has a Drop impl that emits a tracing::error!
+when the handle is dropped without `return_credit()` being called.
+Why is this drop-time warning a real production tool rather than a
+defensive pattern that 'never happens'?
+"""
+answer.answer = "Forgotten credit returns are the canonical bug in the credit-based pattern: a code path that processes the item and exits without calling return_credit (an early return on error, a panic-recover with no cleanup, a refactor that splits processing across functions and loses the handle) leaks one credit. Each leak is invisible at the moment it happens — no error is returned, no panic, no observable symptom — but accumulates into the receiver's counter going to zero permanently. The drop-time warning surfaces the bug at its source rather than days later when the upstream mysteriously stops producing."
+prompt.distractors = [
+    "The drop-time warning catches a Rust borrow-checker bug where the CreditHandle's lifetime expires before its embedded Sender ref; the warning is the user-facing form of that lifetime violation",
+    "The warning fires when the data channel's receiver is dropped; the credit return is then unreachable, and the warning helps ops identify which upstream operators have lost their downstream",
+    "The warning is a benchmark instrumentation that production code disables via a `cfg(release)` flag; in production, the Drop is silent",
+]
+context = """
+The 'forgotten return' bug is the lesson's identified canonical
+failure mode and why the warning exists. Real engineers writing
+real code make this mistake regularly — a try-?-on-an-error path
+that returns early, a refactor that adds a helper function and
+forgets to thread the handle through, a panic-handling path that
+doesn't unwind the credit. Each leak silently lowers the steady-
+state credit count by 1; eventually the receiver's effective grant
+is much smaller than configured, and the upstream produces below its
+documented capacity. The Drop warning makes the leak point visible
+in logs (a stack trace points at the offending code path), so the
+bug is debuggable at all. The other distractors invent properties
+the warning does not have. The lifetime-violation distractor confuses
+runtime drop with compile-time borrow checking. The dropped-receiver
+distractor describes a different (real) bug class. The benchmark-
+disable distractor is fictional — the warning is real production
+instrumentation.
+"""
+
+[[questions]]
+id = "a830af64-b151-4b70-979e-42053677052c"
+type = "MultipleChoice"
+prompt.prompt = """
+SDA has three sources (radar at 5000/sec, optical at 50/sec, ISL at
+100/sec) feeding one shared receiver via credits. The receiver issues
+1000 credits at startup, distributed equally across the three senders
+(333-333-334). After steady-state operation, ops observes that radar
+is consistently at 0 credits while optical and ISL have unused
+credits piling up. The team is considering switching from
+RoundRobinCreditIssuer to FifoCreditIssuer to give credits to whoever
+asks first. What does the lesson say about this choice?
+"""
+answer.answer = "FIFO would let the radar dominate further, not less: radar's high request rate means it would win nearly every credit grant, and optical/ISL would starve worse than they do now. The actual fix depends on the operational goal. If 'fair representation' (every source gets to flow at its natural rate) is the goal, round-robin is correct and the optical/ISL surplus is fine — those senders are already at their natural rates and don't need more credits. If 'maximize total throughput' is the goal, weighted round-robin proportional to per-source steady-state rate gives radar more credits while still leaving headroom for the slower sources. The lesson's framing — credit-issuance fairness is operational — applies."
+prompt.distractors = [
+    "FIFO is the right answer because it solves the surplus problem: optical and ISL stop accumulating unused credits because they only get credits when they request them, and the surplus naturally redistributes to radar",
+    "Increase the total credit pool from 1000 to 10000; the radar will be satisfied even with the equal split because it has 3333 credits instead of 333",
+    "Add a separate credit pool per source so each has its own bound; round-robin would no longer be needed because each pool is independent",
+]
+context = """
+The lesson is precise: FIFO gives faster senders a larger share. The
+team's diagnosis (radar at 0 credits) is correct as a symptom; the
+proposed fix (FIFO) makes the symptom worse, not better. The right
+question is what the operational goal is — 'fair representation' or
+'maximize throughput' — and the answer depends on the answer. The
+distractor about increasing the pool is a temporary fix (radar will
+eventually saturate the larger pool too) without addressing the
+asymmetry. The distractor about per-source pools is structurally
+clean but defeats the credit-pool primitive (separate pools means
+no sharing across sources, which is fine if that's what you want
+but is not what 'redistribute' means). The lesson's pattern: name
+the operational goal, choose the issuance scheme that matches.
+"""
