@@ -1,0 +1,194 @@
+[[questions]]
+id = "f61e0e5e-979c-4e9a-8e99-502e9ca3d8b3"
+type = "MultipleChoice"
+prompt.prompt = """
+A radar observation has sensor_timestamp T = 14:32:05.000 and arrives at
+the pipeline (ingest_timestamp) at 14:32:05.080 — fast, the radar's
+fiber path is direct. An optical observation of the same orbital event
+has sensor_timestamp T = 14:32:05.001 (the telescope detected it 1 ms
+later) and arrives at the pipeline at 14:32:35.000 — 30 seconds late
+because the optical archive is polled on a 30-second cadence. The
+correlator uses 5-second windows. Should these two observations be
+correlated as part of the same event, and which window-assignment
+strategy gets that right?
+"""
+answer.answer = "Yes — they are observations of the same event 1 ms apart in event time, and any reasonable correlator should match them. Event-time window assignment puts both into the window for sensor_timestamp ≈ 14:32:05, which is the same 5-second window. Processing-time window assignment puts the radar observation in the 14:32:05 window and the optical observation in the 14:32:35 window — six windows apart — and they are never correlated. The optical archive's polling delay is a pipeline-side issue, not a sensor-side event-time difference, and event-time assignment is the only strategy that ignores it correctly."
+prompt.distractors = [
+    "No — the 30-second arrival gap means the events should be considered separately. The optical telescope's late observation reflects a possibly different orbital state by the time it arrived; correlating across that gap risks false matches",
+    "Yes by event time, but the correlator should use ingest time as the assignment because optical observations are inherently less trustworthy than radar; the ingest time penalizes the slow source appropriately",
+    "Yes — the right approach is to use whichever timestamp is fresher per observation, on the assumption that whichever clock had the most recent sync is closest to ground truth",
+]
+context = """
+This is the core motivation for event-time semantics. Two observations
+of the same physical event differ in event time by 1 ms (essentially
+zero) but in arrival time by 30 seconds. Processing/ingest-time
+windowing buckets them six windows apart and silently misses the
+correlation. Event-time windowing buckets them together regardless of
+arrival skew. The 'penalize slow source' argument inverts the right
+relationship: the source's slowness is a pipeline-side phenomenon (it
+is the optical archive's polling cadence, not anything intrinsic to
+the optical telescope's detection event), and penalizing it in the
+correlator produces incorrect output for legitimate observations that
+happened to arrive late. The 'fresher timestamp wins' answer is also
+wrong — both observations have valid sensor_timestamps; one source's
+clock is not fresher than the other's. The correct discipline is to
+trust each source's reported event time, widen the matching window by
+the maximum clock skew per the lesson's ClockQuality machinery, and
+bucket by sensor_timestamp.
+"""
+
+[[questions]]
+id = "4dce67c0-b8d5-41c1-84ee-afceba6991a2"
+type = "MultipleChoice"
+prompt.prompt = """
+Operations reports a customer-facing dashboard problem: the SDA pipeline's
+'observations per second' counter looks normal, P99 latency for the alert
+emitter (measured as `now - ingest_timestamp` at emit) looks normal,
+but conjunction alerts are mysteriously absent for the last hour. The
+on-call engineer suspects the pipeline is broken. What is the most
+likely diagnosis given the lesson's framing of times?
+"""
+answer.answer = "The pipeline is processing events but probably has a source-lag spike on one or more sensors — most likely the optical archive whose API has slowed down. Throughput (events per second by ingest time) and pipeline latency (now - ingest_timestamp) are both insensitive to source lag because they measure pipeline-only behavior. The missing alerts are probably a windowing artifact: the pipeline is producing alerts for events whose sensor_timestamps are minutes ago. The 'master diagnostic' the lesson recommends is lag = now - sensor_timestamp, which would show the spike directly."
+prompt.distractors = [
+    "The alert emitter is silently dropping alerts — its dependency (the alert subscriber's HTTP endpoint) is returning 200s but ignoring them. Diagnose by tcpdumping the emitter's outbound traffic",
+    "The pipeline is correctly emitting alerts but the dashboard is misconfigured to filter by ingest_timestamp on a 1-hour window that has slid past the alerts being emitted",
+    "The orchestrator's circuit breaker (Module 2) tripped on the alert subscriber and is open; alerts are being shed entirely. Check the breaker state metric",
+]
+context = """
+This is the diagnostic shape the lesson predicts: the pipeline can
+have a serious problem that is invisible in throughput and pipeline-
+latency metrics because both are measured in the time domain (ingest)
+that the problem does not affect. Source lag — events arriving minutes
+after they happened — is what shows the issue, and source lag is not
+in either of the two metrics the on-call engineer was looking at. The
+alerts are being emitted, but they are emitted for events that
+happened minutes ago; from a real-time-detection perspective, that is
+indistinguishable from missing them. The other distractors are
+plausible alternative diagnoses but each requires more evidence than
+the question provides; the lesson's argument is that lag IS the right
+first thing to look at, and it makes the source-lag hypothesis
+testable in seconds rather than hours.
+"""
+
+[[questions]]
+id = "665d2abb-fa74-4a82-967d-f2de622ab2f6"
+type = "Tracing"
+prompt.program = """
+// Compare event-time vs processing-time window assignment for three
+// observations of the same orbital event from three sources with
+// different arrival lateness. Window size: 5 seconds. Epoch is 0 for
+// arithmetic simplicity.
+
+#[derive(Debug)]
+struct Obs {
+    name: &'static str,
+    sensor_ts_ms: u64,   // event time in milliseconds
+    ingest_ts_ms: u64,   // arrival time in milliseconds
+}
+
+fn window(ts_ms: u64, size_ms: u64) -> u64 { ts_ms / size_ms }
+
+fn main() {
+    let window_size_ms: u64 = 5000;
+    let observations = [
+        Obs { name: "radar",   sensor_ts_ms: 14_000, ingest_ts_ms: 14_080 },
+        Obs { name: "isl",     sensor_ts_ms: 14_010, ingest_ts_ms: 24_010 },
+        Obs { name: "optical", sensor_ts_ms: 14_020, ingest_ts_ms: 44_020 },
+    ];
+    println!("source     event_window  ingest_window");
+    for o in &observations {
+        println!(
+            "{:<10} {:<13} {}",
+            o.name,
+            window(o.sensor_ts_ms, window_size_ms),
+            window(o.ingest_ts_ms, window_size_ms),
+        );
+    }
+}
+"""
+answer.doesCompile = true
+answer.stdout = """source     event_window  ingest_window
+radar      2             2
+isl        2             4
+optical    2             8"""
+context = """
+All three observations have sensor_timestamps within 20 ms of each other
+(the orbital event itself happened essentially at the same instant from
+each sensor's perspective). Their ingest timestamps differ by tens of
+seconds because of source-side delays: the radar's 80-ms latency is the
+network round-trip; the ISL's 10-second buffering before downlink; the
+optical archive's 30-second polling cadence. Bucketing by event time
+puts them all in window 2 (sensor_ts in [10000, 15000) for any of the
+three). Bucketing by ingest time scatters them across windows 2, 4,
+and 8 — six windows apart — because the lateness varies per source.
+The output makes the lesson's correctness argument visible: an event-
+time correlator finds all three observations in window 2 and matches
+them; a processing-time correlator never sees more than one
+observation in any single window for this event and fails to match
+them at all. This is the silent-correctness-bug shape the lesson
+warns about.
+"""
+
+[[questions]]
+id = "45354724-acaf-4f97-a81a-9b494e71689b"
+type = "MultipleChoice"
+prompt.prompt = """
+The lag metric the lesson recommends has two components: source lag
+(`ingest_timestamp - sensor_timestamp`) and pipeline lag (`now -
+ingest_timestamp` for an in-flight observation). What concrete
+operational question can be answered cleanly with the source-lag
+component that cannot be answered cleanly without splitting source
+lag from pipeline lag?
+"""
+answer.answer = "'Is the source slow, or are we slow?' — when the end-to-end lag (`now - sensor_timestamp`) spikes, the on-call engineer needs to know whether to investigate sensor-side problems (network paths, partner APIs, sensor firmware) or pipeline-side problems (slow operators, full channels, runtime issues). Split lag tells you immediately: if source lag spiked and pipeline lag is unchanged, the cause is upstream of ingestion; if pipeline lag spiked and source lag is unchanged, the cause is inside the pipeline. Without the split, the same end-to-end-lag spike could be either, and diagnosis requires correlating other metrics."
+prompt.distractors = [
+    "'Is the alert subscriber up?' — source lag isolates the inbound side from the outbound side; a healthy source-lag metric proves the alert subscriber is processing successfully",
+    "'How many observations did the pipeline see this minute?' — source lag can be aggregated by source kind to give a per-source ingest rate that the basic counter cannot",
+    "'What is the average orbital event's age at emit time?' — source lag plus pipeline lag plus emit latency gives the event's age over its full lifecycle; without the split, the age is uncomputable",
+]
+context = """
+The 'is it ours or theirs' question is the canonical use of split-lag
+metrics. End-to-end lag tells you the symptom (events are being
+emitted N seconds after they happened); split lag tells you the
+location of the cause (source-side vs pipeline-side). The ops gain is
+diagnostic time — minutes of cross-checking become seconds of
+dashboard reading. The other distractors invent uses for split lag
+that the metric does not actually serve: subscriber health is
+downstream of the pipeline (not in lag at all); per-source ingest
+rates are a separate metric (counter, not lag); event age is just
+end-to-end lag without further decomposition. Module 6's observability
+chapter develops the full lag-metric machinery on top of the
+two-component split established here.
+"""
+
+[[questions]]
+id = "d87868b6-b918-4291-b14c-11889dd72872"
+type = "MultipleChoice"
+prompt.prompt = """
+The ClockQuality enum from the lesson's code carries `max_skew()`
+returning a Duration that the correlator widens its matching window
+by. A teammate suggests just using a single fixed widening (say,
+100 ms) for every observation regardless of source. What is the
+strongest argument the lesson makes against the single-fixed-widening
+approach?
+"""
+answer.answer = "A single widening forces a uniform tradeoff that is wrong in both directions. 100 ms is too tight for an ISL beacon at high time-since-sync, where the worst-case skew approaches 360 ms — the correlator misses legitimate matches. 100 ms is too loose for a GPS-locked radar with sub-microsecond skew — the correlator widens its window unnecessarily and produces false positives that should not match. Per-source skew lets each source contribute exactly the widening its clock quality requires, so the correlator is never tighter than necessary for the worst source nor looser than necessary for the best."
+prompt.distractors = [
+    "Per-source skew has lower computational cost: a fixed 100 ms widening requires every observation to be checked against every other observation in the wider window, while per-source skew can prune comparisons that fall outside each source's own narrower bound",
+    "Per-source skew is required by Kafka's exactly-once semantics, which the orchestrator from Module 2 inherits; a fixed widening violates the per-source ordering guarantee",
+    "Per-source skew matches the structure of the OperatorGraph's per-edge channels: each channel can carry its own skew metadata, simplifying the wiring",
+]
+context = """
+The two-direction-wrong argument is the right one. A single number
+makes a Procrustean cut against a heterogeneous source distribution:
+either it is too tight for the loosest source (and you miss matches)
+or too loose for the tightest source (and you produce false matches).
+Per-source widening lets each source contribute the right amount of
+slack independently, which is the only correct treatment of a
+heterogeneous-clock fleet. The cost-prune argument is the wrong
+distractor — per-source skew is per-observation, not lower cost than a
+single number; if anything, per-source has slightly higher per-event
+overhead. The Kafka and OperatorGraph distractors invent constraints
+that do not exist; the per-source skew is a correctness property,
+not a structural one.
+"""
