@@ -1,0 +1,223 @@
+[[questions]]
+id = "e04870e2-d0d4-46b4-9956-66de60750e4f"
+type = "MultipleChoice"
+prompt.prompt = """
+A teammate configures a Kafka producer with `acks=1, retries=0,
+enable.idempotence=false`. They argue this is fine for the SDA pipeline
+because 'the broker confirms acks=1 fast enough, and we have monitoring
+that would catch any drops.' What delivery guarantee does this
+configuration actually provide, and which property of the SDA workload
+makes it inadequate?
+"""
+answer.answer = "At-most-once with weak durability. acks=1 means the producer waits only for the partition leader's acknowledgment, not the in-sync replica set; if the leader fails between writing the message to its local log and replicating to followers, the message is lost on leader election. retries=0 means transient transport failures are not retried, just lost. The combination is adequate only for sheddable telemetry where individual events do not matter; the SDA conjunction-alert path triggers real-world avoidance maneuvers (the SDA-2026-0207 incident the lesson opens with), and the cost of a missed alert (collision risk) makes at-most-once unacceptable. The fix: acks=all + retries > 0."
+prompt.distractors = [
+    "At-least-once with weak durability. acks=1 still ensures durability because the broker writes to its local log before acking; the only window of loss is during leader-election milliseconds, which is rare and recoverable via the next consumer poll",
+    "At-least-once with strong durability. retries=0 only affects the producer's behavior during transient errors; once the broker acks, the message is durable and the duplicate-prevention from enable.idempotence=false does not affect delivery, only ordering",
+    "Exactly-once at the producer side because enable.idempotence=false avoids the producer-id-and-sequence overhead, simplifying the broker's bookkeeping. The cost is paid by the consumer if rebalances occur",
+]
+context = """
+The configuration is at-most-once with weak durability. acks=1 has a
+narrow but real loss window during leader failover. retries=0 turns
+every transient transport error into a permanent loss. enable.idempotence
+is irrelevant when retries=0 (idempotence prevents duplicates from
+retries; with no retries, no duplicates). The lesson's framing is
+explicit: the cost of duplicates determines how tightly the at-least-
+once bound is held; for the alert path, missed messages are the
+worse failure, and acks=all + retries > 0 is the operational answer.
+The other distractors invert the relationship between retries and
+delivery semantics, mistake the role of acks, or invent a property
+of enable.idempotence that does not exist.
+"""
+
+[[questions]]
+id = "1c6c8aca-6a38-4062-b251-15a2934c6165"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson's at-least-once consumer pattern uses `enable.auto.commit=false`
+with explicit `commit_message(..., CommitMode::Sync)` after processing
+each message. A teammate proposes switching to `CommitMode::Async`
+to improve throughput, arguing 'commit latency is the dominant cost
+in the consumer loop and async commits give us the same correctness
+without the wait.' What does this trade away?
+"""
+answer.answer = "Async commits introduce a window between the application's call to commit and the broker's confirmation of the commit. If the consumer crashes inside that window, the offset has been queued but not durably committed; the next consumer instance starts from the previously-confirmed offset and re-reads the in-flight message. This is still at-least-once (the duplicate window has just widened from sub-millisecond to seconds), but the duplicate rate during normal operation is higher, and the application's idempotency tooling does more work. For SDA's reliability budget, the throughput gain (typically 10-20%) is not worth the wider duplicate window; sync commits are the conservative default."
+prompt.distractors = [
+    "Async commits drop messages outright when the broker is slow because the queue's in-memory buffer fills and the oldest commits are evicted; the resulting messages are lost rather than redelivered",
+    "Async commits violate the at-least-once contract because they commit *before* processing completes; the next consumer reads from a stale offset and skips the unprocessed message",
+    "Async commits require enable.idempotence=true on the consumer side (a property that does not exist), and configuring sync gives the only correct choice",
+]
+context = """
+The wider-duplicate-window framing is the right answer. Async commits
+preserve at-least-once but with a larger duplicate window during
+crashes — typically the broker's commit queue depth × the round-trip
+time, which is seconds rather than the sub-millisecond window of sync
+commits. The application's sink-side idempotency absorbs the
+duplicates either way; the cost is that more dedup work happens. The
+distractors invert key relationships: async commits do not skip
+processing (process-then-commit ordering is preserved); they do not
+drop messages outright (failed commits are retried by the kafka
+client); 'consumer-side idempotence' is not a real configuration.
+The lesson's pattern: choose the cost profile that matches the
+duplicate-tolerance of the workload.
+"""
+
+[[questions]]
+id = "69e598b7-4258-4ffd-b71f-9a926cee0cea"
+type = "Tracing"
+prompt.program = """
+// Simulate the difference between process-then-commit and commit-then-
+// process under a deliberate crash. We have 8 messages to process,
+// the consumer crashes after handling message 5 but before/after
+// committing depending on the ordering. Print the number of messages
+// the sink ultimately processes (across both consumer instances) for
+// each ordering.
+
+fn run_with_ordering(commit_first: bool, crash_at: u32) -> u32 {
+    // Processed by both instances combined.
+    let mut total_processed: u32 = 0;
+    // Last committed offset visible to a restarting consumer.
+    let mut committed_offset: u32 = 0;
+    let mut current_offset: u32 = committed_offset;
+    let total_messages: u32 = 8;
+    let mut crashed = false;
+
+    // First consumer instance.
+    while current_offset < total_messages && !crashed {
+        let msg_num = current_offset + 1;
+        if commit_first {
+            committed_offset = msg_num;
+            if msg_num == crash_at {
+                crashed = true;
+                continue;
+            }
+            total_processed += 1;
+        } else {
+            total_processed += 1;
+            if msg_num == crash_at {
+                crashed = true;
+                // commit not reached
+                continue;
+            }
+            committed_offset = msg_num;
+        }
+        current_offset = msg_num;
+    }
+
+    // Second consumer instance: starts at committed_offset.
+    let mut current_offset = committed_offset;
+    while current_offset < total_messages {
+        let msg_num = current_offset + 1;
+        if commit_first {
+            committed_offset = msg_num;
+            total_processed += 1;
+        } else {
+            total_processed += 1;
+            committed_offset = msg_num;
+        }
+        current_offset = msg_num;
+    }
+
+    total_processed
+}
+
+fn main() {
+    let crash_at = 5;
+    let process_then_commit = run_with_ordering(false, crash_at);
+    let commit_then_process = run_with_ordering(true, crash_at);
+    println!("process_then_commit total_processed={}", process_then_commit);
+    println!("commit_then_process total_processed={}", commit_then_process);
+    println!(
+        "delta_vs_8: process_then_commit={} commit_then_process={}",
+        process_then_commit as i32 - 8,
+        commit_then_process as i32 - 8,
+    );
+}
+"""
+answer.doesCompile = true
+answer.stdout = """process_then_commit total_processed=9
+commit_then_process total_processed=7
+delta_vs_8: process_then_commit=1 commit_then_process=-1"""
+context = """
+process_then_commit case: instance A processes messages 1-5 (5 successes
+total_processed += 1 each) then crashes at msg 5 before committing.
+committed_offset stayed at 4 (committed after msg 4 was processed).
+Instance B starts at offset 4, reads messages 5-8 (4 messages),
+processes each. Total: 5 (instance A) + 4 (instance B) = 9. Message 5
+processed twice — the at-least-once duplicate.
+
+commit_then_process case: instance A commits msg 5 first (committed_offset=5)
+then crashes before total_processed += 1. Messages 1-4 were both
+committed and processed (4). Instance B starts at offset 5, processes
+messages 6-8 (3 messages). Total: 4 (instance A) + 3 (instance B) = 7.
+Message 5 silently lost — the at-most-once data loss.
+
+The delta vs 8: process-then-commit is +1 (one duplicate),
+commit-then-process is -1 (one loss). The lesson's discipline picks
+the duplicate over the loss because duplicates are absorbable via
+sink idempotency (Lesson 2) but losses are gone forever. The
+asymmetry is the entire reason 'at-least-once' is the standard
+configuration even though it sounds weaker than 'at-most-once' in
+isolation.
+"""
+
+[[questions]]
+id = "330e1842-402e-4fb4-a970-db3ce16ae17c"
+type = "MultipleChoice"
+prompt.prompt = """
+The SDA pipeline's alert subscriber is non-idempotent — it triggers a
+satellite avoidance maneuver on every alert it receives, and there is
+no way for the subscriber to tell that an alert it received this minute
+is the same alert it acted on last minute. The pipeline is currently
+configured for at-least-once delivery to the subscriber. What is the
+operationally-bad outcome the lesson predicts, and what is the
+recommended fix at the boundary?
+"""
+answer.answer = "Every duplicate alert delivered to the subscriber triggers a redundant maneuver. During healthy steady state, the duplicate rate is low (~0.1%), so the cost is occasional unnecessary maneuvers. During deploys or partition migrations, the rate spikes to several percent for minutes at a time; multiple unnecessary maneuvers consume real fuel and degrade the satellite's mission-life budget. The recommended fix at the boundary is to make the subscriber idempotent on alert_id — store recently-seen alert_ids and ignore duplicates — converting the at-least-once pipeline into effective exactly-once delivery to the subscriber's effect on the world."
+prompt.distractors = [
+    "The subscriber will eventually crash because the duplicate alerts cause its in-memory state to grow unboundedly; the fix is to add a ring buffer of recent maneuvers in the subscriber",
+    "The subscriber will time out on duplicate alerts because the maneuver protocol does not support repeated invocations within a short window; the fix is to add 100ms quiet-time enforcement at the subscriber",
+    "The subscriber's behavior is correct because every alert is a real alert; the duplicates are by definition real conjunctions worth acting on. The fix is to investigate at the producer, not at the subscriber",
+]
+context = """
+The duplicate-causing-real-world-side-effect framing is the canonical
+case the lesson identifies. The subscriber is the boundary between the
+pipeline and the world; idempotency at the boundary is what turns
+at-least-once into effective exactly-once. The lesson says explicitly
+that alerts triggering external actions are the case where this
+matters most. The other distractors invent unrelated mechanisms (the
+subscriber's state would not grow unboundedly from alerts; there is no
+'maneuver protocol quiet-time'); the third inverts the framing
+(duplicates are not 'real alerts seen twice', they are the same alert
+delivered twice, and acting on both is the bug). The lesson's pattern:
+idempotency at every boundary that produces externally-visible effects.
+"""
+
+[[questions]]
+id = "d36b9eba-db4b-4eb0-bb33-e50235069777"
+type = "MultipleChoice"
+prompt.prompt = """
+Operations sees that the SDA pipeline's Kafka producer is configured
+with `max.in.flight.requests.per.connection=5`. Under retry conditions,
+they observe out-of-order delivery: an observation with sensor_timestamp
+T arrives at the consumer after another with sensor_timestamp T+50ms.
+The consumer's correlation logic depends on per-key event-time order
+within a partition. What is the lesson's framing of this tradeoff?
+"""
+answer.answer = "max.in.flight > 1 with idempotence disabled allows reordering on retry. Send A is in-flight, B is in-flight; A times out and is retried; B succeeds first; broker writes B-then-A. The consumer sees B-then-A, which violates per-partition order. Two operational responses: set max.in.flight=1 for strict order at the cost of throughput (the degenerate single-credit case from Module 4 L2), or enable.idempotence=true which lets max.in.flight=5 stay safe (the broker uses producer-id + sequence to dedup AND reorder on the broker side). The lesson recommends the latter for production, but the bare at-least-once configuration in this lesson uses max.in.flight=1 to make the ordering property explicit."
+prompt.distractors = [
+    "max.in.flight=5 has no effect on ordering when partitions are properly keyed; the consumer-side correlation logic should rely on the partition's order-within-key invariant, not on the producer's send order",
+    "Out-of-order delivery is not a real Kafka behavior; if the consumer sees it, the bug is in the producer's serialization (e.g., serializing observations from a HashMap that produces non-deterministic iteration order)",
+    "max.in.flight is a broker-side setting that the consumer cannot affect; the fix is to switch to a different broker configuration or wait for the next Kafka release that addresses this",
+]
+context = """
+The lesson's framing of max.in.flight is precise. Without idempotence,
+values > 1 risk reordering on retry by exactly the mechanism the
+correct answer describes. Two fixes: drop to 1 (strict order, lower
+throughput) or enable idempotence (the broker dedups AND reorders, so
+max.in.flight=5 is safe). Production typically uses the second; the
+lesson's at-least-once configuration uses 1 to keep the demonstration
+explicit. The other distractors deny that reordering happens (it
+does, by design), invent a producer-side bug that is not the cause
+(HashMap iteration order is unrelated to send order in the producer),
+or claim the setting is broker-side (it is producer-side).
+"""

@@ -1,0 +1,198 @@
+[[questions]]
+id = "b6103c1a-3fd0-47c7-b5cb-bd6711f3e3bd"
+type = "MultipleChoice"
+prompt.prompt = """
+A teammate proposes a 'simpler' checkpoint scheme: write only the
+operator's serialized state to disk on every snapshot, but not the
+input offset. The argument: 'the offset is recoverable from the Kafka
+consumer's committed offset, which is already durable; storing it
+again in the checkpoint duplicates information.' What does the lesson
+say about why this breaks the recovery contract?
+"""
+answer.answer = "The Kafka consumer's committed offset and the operator's checkpointed state can diverge. The consumer commits offsets after the message is processed and emitted to the next operator; the operator's checkpoint is taken on its own cadence, which may be after several more messages have been processed. On restart, loading state alone (without the checkpoint's offset) means the operator does not know which input it had consumed at the time of the snapshot. Resuming from the consumer's committed offset replays messages the operator had already incorporated into the saved state, producing duplicate processing in the operator's state. The State+Offset pair is the contract: state without offset is a vintage-unknown snapshot, and recovery from it is incorrect."
+prompt.distractors = [
+    "The proposal works only if the operator is stateless; for stateful operators the checkpoint must include the full Kafka topic state (broker logs, leader assignments) which a per-operator checkpoint cannot provide",
+    "The proposal violates Kafka's at-least-once contract because the consumer's committed offset advances past the last fully-processed message; the checkpoint must track its own offset to re-read messages that were partially processed at crash time",
+    "The proposal requires the checkpoint's deserializer to match the consumer's offset format exactly, which differs between Kafka versions; storing the offset in the checkpoint provides version-independence",
+]
+context = """
+The state-without-offset is a known anti-pattern that produces hard-
+to-diagnose recovery bugs. The lesson's framing is precise: the
+checkpoint MUST include both halves because they are independent in
+time and must be reconciled at restart. The other distractors invent
+unrelated mechanisms (Kafka topic state is not part of the operator's
+checkpoint; the consumer's committed offset advances correctly with
+process-then-commit; the deserializer doesn't depend on Kafka version
+because the format is the operator's own bincode/JSON, not Kafka's
+internal format). The lesson's pattern: every checkpoint write is
+atomic over State+Offset; any read returns both or fails.
+"""
+
+[[questions]]
+id = "0587bbd8-a7c3-4baf-9b3e-80435f931175"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson contrasts aligned checkpoints (Flink's barrier mechanism)
+with per-operator checkpoints. SDA uses per-operator. A teammate argues
+'aligned is strictly better — it gives consistent cuts across operators,
+which sounds like a stronger correctness property.' What does the
+lesson say about why per-operator is the right choice for SDA?
+"""
+answer.answer = "Aligned checkpoints have a real cost: the slowest input's barrier delay stalls the entire checkpoint, and the orchestrator must implement the barrier protocol coherently across every operator. Per-operator checkpoints are simpler — each operator independently snapshots on its own cadence — and the cross-operator inconsistency they admit is recovered via the at-least-once + idempotency composition from Lessons 1 and 2. After restart, operator A may resume at a different offset than operator B, and A re-emits messages that B has already processed; B's idempotent dedup absorbs them. SDA's pipeline already has the idempotency machinery (M2 L3, M3 L4), so per-operator checkpoints reuse that machinery to recover global consistency without paying the alignment cost."
+prompt.distractors = [
+    "Aligned checkpoints are technically infeasible without a transactional Kafka producer; the SDA pipeline does not use transactional Kafka, so per-operator is the only available choice. Adding transactional Kafka and switching to aligned would be the operationally correct path",
+    "Aligned checkpoints require all operators to snapshot to the same physical storage device for atomicity; per-operator allows each operator to use its own storage, which is necessary for runtime-bulkheaded operators (the propagator from M2 L4)",
+    "Aligned checkpoints fundamentally cannot work in tokio's async runtime because the barrier requires synchronous coordination that tokio's cooperative scheduler does not support. Per-operator is the only viable choice in Rust",
+]
+context = """
+The composition argument is the right answer. Per-operator
+checkpointing is simpler and reuses idempotency machinery to recover
+global consistency. The cost-of-alignment (slowest-input stall,
+coordinator complexity) is real and the benefit (cross-operator cut)
+is what idempotency already provides. The other distractors invent
+constraints: aligned checkpoints don't require transactional Kafka
+(Flink works fine without it); they don't require shared storage
+(each operator can write to its own location); they work fine in
+tokio (the barrier protocol is async-friendly). The lesson's framing:
+choose the simplest mechanism that gives the guarantee, and per-
+operator + idempotency gives effective exactly-once at lower cost
+than aligned + transactions.
+"""
+
+[[questions]]
+id = "e1a8254e-adcd-4a1d-b148-78bbe8fedba8"
+type = "Tracing"
+prompt.program = """
+// Simulate the checkpoint + recovery cycle for a stateful counter
+// operator. The state is just a count; events increment it. We
+// process 10 events, take checkpoints at events 3, 6, 9, then crash
+// after event 10. Recovery loads the latest checkpoint (event 9),
+// then replays events 10..=10. Print final state and offset.
+
+#[derive(Debug, Clone, Copy)]
+struct Checkpoint { count: u32, offset: u32 }
+
+fn main() {
+    let total_events: u32 = 10;
+    let checkpoint_at: [u32; 3] = [3, 6, 9];
+
+    // First run: process events 1..=10, checkpoint at 3,6,9, then crash.
+    let mut count: u32 = 0;
+    let mut offset: u32 = 0;
+    let mut latest_cp: Option<Checkpoint> = None;
+    for ev in 1..=total_events {
+        count += 1;
+        offset = ev;
+        if checkpoint_at.contains(&ev) {
+            latest_cp = Some(Checkpoint { count, offset });
+            println!("checkpoint at event={} -> count={} offset={}", ev, count, offset);
+        }
+    }
+    // Simulated crash: drop in-memory state after event 10.
+    println!("CRASH after event={} (in-memory count={})", total_events, count);
+
+    // Recovery: load the latest checkpoint, set the offset, resume.
+    let cp = latest_cp.expect("must have a checkpoint to recover from");
+    let mut count = cp.count;
+    let mut offset = cp.offset;
+    println!("RECOVER from checkpoint count={} offset={}", count, offset);
+
+    // Replay from offset+1 onwards.
+    for ev in (offset + 1)..=total_events {
+        count += 1;
+        offset = ev;
+    }
+    println!("post-recovery count={} offset={}", count, offset);
+}
+"""
+answer.doesCompile = true
+answer.stdout = """checkpoint at event=3 -> count=3 offset=3
+checkpoint at event=6 -> count=6 offset=6
+checkpoint at event=9 -> count=9 offset=9
+CRASH after event=10 (in-memory count=10)
+RECOVER from checkpoint count=9 offset=9
+post-recovery count=10 offset=10"""
+context = """
+The trace shows the State+Offset recovery contract working correctly.
+On the first run: the operator processes 10 events incrementing count
+each time, taking checkpoints at events 3, 6, 9. The latest checkpoint
+captures count=9 at offset=9. Crash after event 10 loses the in-memory
+state at count=10.
+
+Recovery loads the latest checkpoint (count=9, offset=9), then replays
+from offset+1 = 10 onwards. Replay processes event 10, increments count
+to 10. Final state matches the pre-crash state.
+
+The pattern is what makes the recovery correct: the State (count=9) and
+the Offset (offset=9) are stored together; on restart, both are loaded
+together; replay from offset+1 reproduces the lost in-memory work.
+Without the offset (the previous question's anti-pattern), the operator
+would not know to start at 10; without the state, the operator would
+re-process events 1..=10 and end at count=10 only by coincidence (it
+would need to know it had previously committed events 1..=9). The
+State+Offset pair is the contract that makes recovery deterministic.
+"""
+
+[[questions]]
+id = "48771d26-56ee-4ff8-8200-4b45191719fe"
+type = "MultipleChoice"
+prompt.prompt = """
+The SDA pipeline checkpoints every 30 seconds and writes to a local
+NVMe device. The pause-snapshot-resume duration is consistently 80ms;
+operations measures this directly. A teammate proposes increasing the
+checkpoint cadence to every 5 seconds 'to reduce the recovery time
+window.' What is the lesson's framing of the tradeoff?
+"""
+answer.answer = "More frequent checkpoints reduce the maximum amount of work that recovery replays (the 'lost work window' between the last checkpoint and the crash) but increase the steady-state latency cost. At 30-second cadence with 80ms pause, the pipeline spends 80/30000 = 0.27% of wall-clock time paused. At 5-second cadence with 80ms pause, the cost is 80/5000 = 1.6%, a 6x increase in steady-state pause overhead. For SDA's 30-second alert SLO, the 0.27% cost is comfortably below the budget; 1.6% might still fit but reduces the headroom. The right cadence balances recovery time (proportional to cadence) against steady-state cost (proportional to pause / cadence). The lesson recommends starting with cadence sized to the recovery time budget and tuning empirically."
+prompt.distractors = [
+    "More frequent checkpoints always strictly improve correctness because every checkpoint reduces the duplicate window during replay; the steady-state cost is irrelevant compared to correctness",
+    "Less frequent checkpoints are always better for production because they reduce write amplification on the storage device; NVMe wear-leveling is the dominant operational concern",
+    "The cadence does not affect recovery time because the recovery time is dominated by the deserialize cost, not the replay cost; cadence affects only the steady-state cost",
+]
+context = """
+The recovery-vs-steady-state tradeoff is the right framing. More
+frequent checkpoints reduce replay distance but increase pause
+overhead; less frequent reduces overhead but increases replay distance.
+The right cadence is a tuning decision based on the SLO and the
+storage characteristics. The lesson's guidance: start with cadence
+sized to the recovery time budget (30s recovery means 30s cadence
+in the worst case) and tune from there. The 'always better' answer
+ignores the latency cost. The 'NVMe wear' answer is real but rarely
+dominant in modern devices. The 'cadence doesn't affect recovery
+time' answer is wrong: replay distance IS proportional to cadence
+when the pipeline is at steady-state load, and the deserialize cost
+is typically a small fraction of replay time for non-trivial state.
+"""
+
+[[questions]]
+id = "abd6165c-ecf1-4ff6-bccc-73e6a8460ecb"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson's checkpoint write uses a temp-file + atomic-rename pattern
+rather than writing directly to the final path. A teammate asks why
+direct write is not safe enough — 'the disk's write cache and the
+filesystem journal handle the consistency, don't they?' What does
+the lesson say about why the rename is the correct durability barrier?
+"""
+answer.answer = "The temp-file + atomic-rename pattern guarantees the file at the final path is either the previous good checkpoint or the new good checkpoint, never a partial state. A direct write to the final path leaves the file in a partial state during the write — if the process crashes mid-write, the file on disk may be partially-written and unable to deserialize, OR (worse) deserialize to an inconsistent State+Offset pair. The atomic rename is the filesystem-level guarantee that the path's content transitions all-at-once from old to new; it is the durability barrier that direct write cannot provide regardless of disk write caches or journal behavior."
+prompt.distractors = [
+    "Direct write is safe on modern filesystems (ext4 with journal=data, xfs default settings) because the journal serializes write completion with file metadata updates; the temp-file pattern is needed only on legacy filesystems",
+    "The rename pattern is required because POSIX `write` does not flush kernel buffers to disk; without the rename, a crash can lose the write entirely. The rename forces a sync barrier",
+    "The rename pattern is faster because the filesystem can bypass the page cache for renames but not for direct overwrites; the speed difference is what motivates the pattern",
+]
+context = """
+The atomic-transition argument is the right one. The rename's value
+is structural: the file's content is either the old version or the
+new version, never a partial state. The disk's write cache and the
+filesystem journal protect against power loss and provide some
+ordering guarantees but do not provide the all-or-nothing-content
+property at the file level. A process crash mid-write can leave the
+file at the final path in a half-written state that the next startup
+sees as the 'current' checkpoint, and that startup's recovery is
+incorrect. The temp-file + rename is the standard pattern in any
+durable-state-write code (databases, configuration files, log
+indices). The other distractors invent unrelated properties: modern
+filesystems do not solve this; rename does not force a sync barrier
+(separate `fsync` is needed for that); rename is not faster than
+direct overwrite at this scale.
+"""

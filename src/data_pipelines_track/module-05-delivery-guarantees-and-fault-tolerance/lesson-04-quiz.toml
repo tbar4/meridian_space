@@ -1,0 +1,220 @@
+[[questions]]
+id = "4a3935b4-5cfb-46dc-98f3-3bb2ee74f2f1"
+type = "MultipleChoice"
+prompt.prompt = """
+For each of the following errors that an SDA operator might encounter,
+which retry-disposition is correct per the lesson's framework?
+
+  (a) reqwest::Error: timeout (the optical-archive HTTP poll hit the
+      30-second client-side timeout).
+  (b) serde_json::Error: missing field 'sensor_timestamp' (the response
+      JSON does not match the expected schema).
+  (c) HTTP 401 Unauthorized (the pipeline's API token is no longer valid).
+  (d) Observation { sensor_timestamp: SystemTime::UNIX_EPOCH } (a record
+      with the placeholder zero timestamp, which the operator's
+      validation rejects as nonsensical).
+"""
+answer.answer = "(a) Retry — transient timeout, will likely resolve on retry. (b) DLQ — schema mismatch, retry won't fix it; needs human investigation (likely a partner-side change). (c) DLQ — auth failure is permanent until credentials are rotated; retry would not help and would consume retry budget. (d) Discard — invariant violation that should never appear in healthy traffic; the operator drops with a metric increment for visibility but does not warrant operational attention. The lesson's rule: transient errors retry, permanent errors that need investigation go to DLQ, invariant violations that don't warrant attention drop with a counter."
+prompt.distractors = [
+    "All four go to DLQ. The lesson's default for any error is DLQ, and the categorization between Permanent and Discard is an internal optimization that doesn't affect operator code",
+    "(a) Retry, (b) Retry until budget exhausted then DLQ, (c) DLQ, (d) DLQ. The 401 is handled like a 5xx because retries are conservative; the malformed JSON might be fixed by a follow-up retry of the same endpoint",
+    "(a) Retry, (b) Discard (the response is invalid, drop and continue), (c) Retry (the auth token might be refreshed by another operator), (d) DLQ (any invariant violation is investigation-worthy)",
+]
+context = """
+The classification is the operator's responsibility and the lesson is
+explicit about the rules. (a) timeout: classic transient. (b)
+deserialization error from a schema mismatch: every retry produces
+the same error; operations needs to know about it (the partner changed
+the wire format). (c) 401: every retry produces 401 until creds are
+rotated; ops needs to know. (d) invariant violation that should not
+appear in valid traffic: drop, log a counter for visibility, no
+investigation. The 'all DLQ' answer over-simplifies and floods the
+DLQ with noise that hides real issues. The 'retry until budget' for
+(b) is wrong because the budget will exhaust after several retries
+producing the same error (CPU and time wasted before reaching DLQ).
+The 'Discard for (b)' is wrong because schema mismatches need
+operational attention. The operator's classifier encodes these rules
+explicitly per error kind, with comments naming the rationale.
+"""
+
+[[questions]]
+id = "3833673f-b83b-4c57-92e1-33f3bf9e61e9"
+type = "MultipleChoice"
+prompt.prompt = """
+The pipeline has been running cleanly for months. Operations sees
+the dashboard's `dlq_entries_total{error_kind="Deserialization"}`
+counter spike from its baseline of ~5/day to 200 in the last 10
+minutes. The events are all from operator `optical-ingest`. What
+should the on-call engineer's first hypothesis be, and what does the
+DLQ's design support?
+"""
+answer.answer = "The hypothesis is that the optical-archive partner has changed their wire format (a field renamed, a type changed, a new required field added, or a similar breaking schema change rolled out without coordination). The DLQ's metadata supports this diagnosis: each entry has the original payload bytes (which the on-call can manually deserialize against the new schema to confirm), the operator name (narrowing the scope to the optical-archive ingest path), and the error_message (which serde produces with a specific 'expected X, found Y' description). Operations checks the DLQ entries, confirms the partner-side change, contacts the partner, and once the change is reverted or the operator's deserializer is updated, the re-processing tool re-injects the affected window from the DLQ."
+prompt.distractors = [
+    "The hypothesis should be a Kafka broker degradation; deserialization errors during partition rebalances are common and the on-call should investigate the cluster's health first",
+    "The first hypothesis should be that the disk holding the DLQ is corrupted; spike in deserialization errors with no visible upstream cause is a classic disk-corruption pattern that the DLQ's append-only writes do not protect against",
+    "The hypothesis should be that the operator's classifier has a bug; the same events are being miscategorized as deserialization failures when they are actually validation failures. The fix is to inspect the operator's classifier code, not the DLQ entries",
+]
+context = """
+The partner-API-change hypothesis is the canonical scenario the lesson
+develops. A spike in deserialization errors all from one operator,
+all within a short window, points at the upstream source of that
+operator. The DLQ's metadata is exactly what enables this diagnosis:
+the original_payload lets ops see the actual bytes that failed; the
+error_message names the field that was missing or unexpected; the
+operator name narrows the scope. The other distractors propose
+plausible-sounding but unrelated hypotheses (Kafka rebalances don't
+produce per-operator deserialization errors; disk corruption would
+typically show as a different error kind; classifier bugs would
+manifest as misrouted entries, not as a sudden spike). The lesson's
+discipline: design the DLQ entries to support the diagnosis, then
+trust the metadata to drive the hypothesis.
+"""
+
+[[questions]]
+id = "a3323452-c74b-46f7-a3ed-70b9eec9d7b0"
+type = "Tracing"
+prompt.program = """
+// Simulate the operator's retry-disposition classifier for a stream
+// of error kinds. Print the disposition assigned to each error and
+// the ending counters for retry-attempts, DLQ-entries, and discards.
+
+#[derive(Debug)]
+enum ErrorKind {
+    Timeout,
+    DeserError,
+    Unauthorized,
+    InvariantZeroTimestamp,
+    LeaderElection,
+}
+
+#[derive(Debug)]
+enum Disposition { Retry, Dlq, Discard }
+
+fn classify(e: &ErrorKind) -> Disposition {
+    match e {
+        ErrorKind::Timeout => Disposition::Retry,
+        ErrorKind::DeserError => Disposition::Dlq,
+        ErrorKind::Unauthorized => Disposition::Dlq,
+        ErrorKind::InvariantZeroTimestamp => Disposition::Discard,
+        ErrorKind::LeaderElection => Disposition::Retry,
+    }
+}
+
+fn main() {
+    let errors = [
+        ErrorKind::Timeout,
+        ErrorKind::DeserError,
+        ErrorKind::Unauthorized,
+        ErrorKind::Timeout,
+        ErrorKind::InvariantZeroTimestamp,
+        ErrorKind::LeaderElection,
+        ErrorKind::DeserError,
+    ];
+    let mut retries = 0u32;
+    let mut dlq = 0u32;
+    let mut discards = 0u32;
+    for (i, e) in errors.iter().enumerate() {
+        let d = classify(e);
+        println!("step={} error={:?} -> disp={:?}", i + 1, e, d);
+        match d {
+            Disposition::Retry => retries += 1,
+            Disposition::Dlq => dlq += 1,
+            Disposition::Discard => discards += 1,
+        }
+    }
+    println!("totals: retries={} dlq={} discards={}", retries, dlq, discards);
+}
+"""
+answer.doesCompile = true
+answer.stdout = """step=1 error=Timeout -> disp=Retry
+step=2 error=DeserError -> disp=Dlq
+step=3 error=Unauthorized -> disp=Dlq
+step=4 error=Timeout -> disp=Retry
+step=5 error=InvariantZeroTimestamp -> disp=Discard
+step=6 error=LeaderElection -> disp=Retry
+step=7 error=DeserError -> disp=Dlq
+totals: retries=3 dlq=3 discards=1"""
+context = """
+The trace exercises the lesson's classification rules.
+- Timeout (transient network condition): Retry. Both occurrences route
+  the same way.
+- DeserError (schema mismatch — partner change or incompatible payload):
+  DLQ. Retries do not fix it. Both occurrences route to DLQ.
+- Unauthorized (auth credential expired or invalid): DLQ. Until creds
+  are rotated, every retry produces 401.
+- InvariantZeroTimestamp (the placeholder zero timestamp shouldn't
+  appear in valid traffic): Discard with a counter. No operational
+  attention warranted; the metric tracks the rate.
+- LeaderElection (transient broker condition): Retry. Routine.
+
+Final totals: 3 retries (Timeout, Timeout, LeaderElection), 3 DLQ
+(DeserError, Unauthorized, DeserError), 1 discard
+(InvariantZeroTimestamp). The discipline is the same in every
+operator: classify each error explicitly, document the rationale per
+branch, default unknown errors to DLQ so they surface rather than
+get silently retried or dropped.
+"""
+
+[[questions]]
+id = "003fdb6e-20cc-4bc6-b745-ddfdf172eac6"
+type = "MultipleChoice"
+prompt.prompt = """
+The DLQ schema includes a `schema_version: u32` field. A teammate sees
+this and asks 'why? the entries are written by the same code that
+reads them; the version is always the same.' What does the lesson
+say about why the version field is load-bearing for the DLQ's
+operational role?
+"""
+answer.answer = "DLQ entries accumulate over time horizons longer than the pipeline's deploy cadence. An entry written six months ago by pipeline version 1.2.3 might be read by a re-processing tool running pipeline version 2.0.0, which has a different DlqEntry struct (a renamed field, a new required field, an enum variant added). Without the version field, the re-processing tool either crashes on the old entries or silently misinterprets them. With the version field, the tool can dispatch on the version and apply the right deserialization logic for each entry's vintage. The version is the migration mechanism for the DLQ schema's evolution over time, and it is needed precisely because reader and writer are not always at the same version."
+prompt.distractors = [
+    "The schema_version field is required by the JSON-Lines format specification, which mandates a versioned envelope around every record. Removing it produces files that do not parse with standard tools",
+    "The schema_version field is read by the alert-on-growth-rate dashboard panel to filter entries by pipeline version, so ops can correlate spikes with specific deploys",
+    "The schema_version field is a defensive programming pattern that the team agreed to use everywhere; it doesn't have a specific purpose in the DLQ but the consistency is operationally valuable",
+]
+context = """
+The migration-mechanism framing is the right answer. DLQ entries are
+durable records that span pipeline deployments; the writer's schema
+must be discoverable by the reader regardless of which version each
+is at. The version field is what makes that work — the tool dispatches
+on `schema_version` and applies the right struct for that vintage. The
+distractors invent unrelated purposes: JSON-Lines doesn't mandate a
+version field; the dashboard does not filter on it (it filters on
+error_kind and operator); the consistency-for-its-own-sake answer
+misses the load-bearing operational point. The lesson's pattern: any
+durable record that outlives a single binary version needs its own
+version field for migration.
+"""
+
+[[questions]]
+id = "1fdee981-ce12-4582-a9ee-038ded46d191"
+type = "MultipleChoice"
+prompt.prompt = """
+Operations runs the re-processing tool against a window of DLQ
+entries from yesterday's optical-archive partner-API outage. The
+tool re-injects 1,247 events into the pipeline's input topic. After
+the re-processing completes, ops checks the conjunction-alert
+subscriber's logs and finds zero new alerts triggered. Why is this
+the expected outcome (and a sign the system is working correctly)
+rather than a sign the re-processing failed?
+"""
+answer.answer = "The re-injected events are duplicates of events the pipeline had already processed during the outage and ones from before the outage that already produced their alerts. The L2 idempotency machinery (sink-side dedup keyed on observation_id, the alert subscriber's seen-alert-ids set) absorbs the duplicates without producing new effects. Zero new alerts is exactly correct — the events were already incorporated into the system's state on their original passage through the pipeline. The re-processing's value was ensuring the events landed in the audit log and any downstream analytics that the partial outage processing had missed; the conjunction-alert path was idempotent and saw the duplicates as no-ops."
+prompt.distractors = [
+    "The re-processing tool is misconfigured; it re-injected the events but to the wrong topic, so they bypassed the conjunction-correlator entirely. Check the topic name in the tool's configuration",
+    "The pipeline's checkpoint state is incompatible with re-injected events; the correlator's sliding windows do not accept events with sensor_timestamps from yesterday because the windows have already closed and been evicted",
+    "The alert subscriber rejected the alerts because of duplicate-Idempotency-Key headers from the re-injection; the subscriber should be reconfigured to accept duplicates during re-processing windows",
+]
+context = """
+The idempotency-absorbing-duplicates outcome is the right answer and
+the lesson's intended design. Re-processing produces duplicates by
+construction; the L2 machinery absorbs them; zero new external
+effects is the indicator the system is working as designed. The
+distractors invent failure modes that don't apply: misconfigured
+topics produce no events delivered (which would be visible as a
+metric, not a silent zero); checkpoint state for windowed correlator
+DOES handle late events via the M3 L4 allowed-lateness machinery;
+the alert subscriber's idempotency does not 'reject' duplicates,
+it ignores them silently. The lesson's pattern: if you are doing
+re-processing correctly with idempotency in place, the expected
+result is exactly 'no new effects' for events that had already been
+fully processed.
+"""

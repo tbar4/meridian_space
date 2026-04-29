@@ -1,0 +1,243 @@
+[[questions]]
+id = "0b95c31c-1b34-42f9-8666-55ce14044dff"
+type = "MultipleChoice"
+prompt.prompt = """
+Classify each of the following operations as idempotent or
+not-idempotent on the natural key shown:
+
+  (a) `INSERT INTO obs (observation_id, ...) VALUES (...) ON CONFLICT (observation_id) DO NOTHING` keyed on observation_id
+  (b) `INSERT INTO obs (observation_id, ...) VALUES (...)` (no conflict clause) keyed on observation_id
+  (c) `UPDATE obs SET payload=$1 WHERE observation_id=$2` keyed on observation_id
+  (d) `UPDATE counts SET total = total + 1 WHERE bucket=$1` keyed on bucket
+
+Which set is idempotent?
+"""
+answer.answer = "(a) and (c) are idempotent. (a) ON CONFLICT DO NOTHING is the canonical idempotent insert: a duplicate row at the same observation_id is silently rejected. (c) UPDATE to a specific value is idempotent regardless of how many times it executes — the field ends up at the value $1 either way. (b) is non-idempotent because plain INSERT without ON CONFLICT errors on duplicate primary keys, and even if the error is caught, the second row would be a duplicate. (d) is the canonical non-idempotent operation: every execution increments `total`, so duplicate executions produce wrong results."
+prompt.distractors = [
+    "(a) only — UPDATE is non-idempotent because it requires the row to exist first; a duplicate UPDATE on a missing row silently does nothing while the original would have failed. Idempotency requires identical effect, which is violated by the missing-row case",
+    "(a), (c), and (d) — increment-with-WHERE-clause is idempotent because the WHERE selects exactly one row, and updating it once or multiple times is the same final effect: total = total + N where N is the number of executions",
+    "All four — every SQL operation is idempotent at the row level because the database serializes concurrent executions; the observed effect on the world is determined by the last successful execution regardless of how many times it ran",
+]
+context = """
+The lesson's framing is operation-level idempotency, not table-level
+or transaction-level. (a) is idempotent by the ON CONFLICT clause.
+(c) UPDATE-to-specific-value is idempotent because the result of
+running it any number of times is the same final value. (b) bare
+INSERT errors on duplicates and is therefore not idempotent (the
+caller must handle the error, which is not the 'identical effect'
+property). (d) is the canonical non-idempotent operation — every
+execution adds 1 to total, so duplicates produce miscounts. The
+distractor about UPDATE-on-missing-rows confuses idempotency with
+guaranteed effect; UPDATE is idempotent because running it twice
+produces the same row state, not because it always changes a row.
+The third distractor invents a property that does not exist (DBs
+don't dedupe operations; they execute them all).
+"""
+
+[[questions]]
+id = "8dd307cf-d674-4a8b-9ee0-6c4f36919450"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson's DedupSet uses a window-based time bound AND a count-based
+capacity bound. A teammate proposes simplifying to time-only, arguing
+'the count bound is just defensive overengineering — if memory is a
+concern, just shrink the window.' What does the lesson say about why
+the double-bound is the production-safety pattern?
+"""
+answer.answer = "Time-only fails under bursts. The window assumes a roughly steady-state ingest rate; under a 10x burst (the post-Cosmos-1408 scenario from M4), the seen-set grows in proportion to the burst rate × the window size, regardless of the configured window. With a 5-minute window and a 50K events/sec burst, the time-only seen-set holds 15 million entries — a memory cost that exceeds typical pipeline budgets. The count bound is the safety valve that fires when the time-bound's implicit capacity is exceeded. Shrinking the window risks duplicates leaking past the dedup window; the count bound preserves the dedup property under bursts at the cost of brief over-eviction during the burst itself."
+prompt.distractors = [
+    "Time-only is fine in principle but Rust's BTreeSet has worst-case O(N) iteration during eviction; the count bound is a Rust-specific optimization that lets eviction be amortized O(log N)",
+    "The count bound is required by tokio's async runtime's memory budget — the runtime kills tasks whose internal collections exceed 100MB. The count bound is sized to keep BelowMthe runtime's threshold",
+    "Time-only is incorrect because system time can go backwards (NTP corrections, clock drift); without the count bound, an entry inserted in the future relative to a later insert would never evict",
+]
+context = """
+The burst-survival framing is the lesson's specific argument. Time-
+only is a memory bomb under bursts; count-only is a safety valve
+that bounds memory regardless of input rate. The double-bound is the
+production pattern. The other distractors invent constraints that
+don't exist: BTreeSet eviction is amortized O(log N) regardless of
+which bound triggers it; tokio doesn't kill tasks for memory; system
+time can go backwards but the eviction code uses checked_sub/saturating
+arithmetic to handle that case (and the count bound is not the right
+fix for clock skew anyway). The lesson's pattern is precise: the time
+bound matches the duplicate-source distribution; the count bound is
+the safety valve that lets the time bound stay aggressive without
+risking unbounded growth.
+"""
+
+[[questions]]
+id = "221b016e-5bb6-4cd0-84f9-fe593e8f5554"
+type = "Tracing"
+prompt.program = """
+// Simulate the DedupSet's behavior under a sequence of records with
+// timestamps, with a 10-second window and capacity 4. Each step is
+// a (id, timestamp_secs) pair. Print 'novel' (record returns true) or
+// 'duplicate' (record returns false), plus the seen-set size after.
+
+use std::collections::{BTreeSet, VecDeque};
+
+struct DedupSet {
+    seen: BTreeSet<u32>,
+    order: VecDeque<(u32, u64)>,
+    window_secs: u64,
+    capacity: usize,
+}
+
+impl DedupSet {
+    fn new(window_secs: u64, capacity: usize) -> Self {
+        Self {
+            seen: BTreeSet::new(),
+            order: VecDeque::new(),
+            window_secs,
+            capacity,
+        }
+    }
+    fn record(&mut self, id: u32, ts: u64) -> bool {
+        let cutoff = ts.saturating_sub(self.window_secs);
+        while let Some(&(front_id, front_ts)) = self.order.front() {
+            if front_ts < cutoff || self.order.len() >= self.capacity {
+                self.order.pop_front();
+                self.seen.remove(&front_id);
+            } else {
+                break;
+            }
+        }
+        if self.seen.contains(&id) { return false; }
+        self.seen.insert(id);
+        self.order.push_back((id, ts));
+        true
+    }
+}
+
+fn main() {
+    let mut d = DedupSet::new(10, 4);
+    let events: [(u32, u64); 8] = [
+        (101, 5),    // novel
+        (102, 6),    // novel
+        (101, 7),    // duplicate
+        (103, 8),    // novel (size=3)
+        (104, 9),    // novel (size=4, at capacity)
+        (105, 10),   // novel; capacity-evicts oldest (101 at 5)
+        (101, 11),   // novel (101 was evicted)
+        (102, 18),   // novel; time-evicts 102 (was at 6, cutoff = 18-10=8)
+    ];
+    for (i, &(id, ts)) in events.iter().enumerate() {
+        let novel = d.record(id, ts);
+        let label = if novel { "novel" } else { "duplicate" };
+        println!("step={} id={} ts={} -> {} size={}", i + 1, id, ts, label, d.seen.len());
+    }
+}
+"""
+answer.doesCompile = true
+answer.stdout = """step=1 id=101 ts=5 -> novel size=1
+step=2 id=102 ts=6 -> novel size=2
+step=3 id=101 ts=7 -> duplicate size=2
+step=4 id=103 ts=8 -> novel size=3
+step=5 id=104 ts=9 -> novel size=4
+step=6 id=105 ts=10 -> novel size=4
+step=7 id=101 ts=11 -> novel size=4
+step=8 id=102 ts=18 -> novel size=4"""
+context = """
+Steps 1-2: 101 and 102 inserted novelly; seen-set size grows from 0 to 2.
+Step 3: 101 is already in the set; record returns false (duplicate);
+size unchanged at 2. This is the dedup operation in action.
+Step 4: 103 novel; size 3.
+Step 5: 104 novel; size 4 — at capacity.
+Step 6: 105 arrives at ts=10. The eviction loop runs: cutoff = 10-10 = 0,
+front (101, ts=5) is not < 0 (no time-eviction), but the size>=capacity
+branch fires (4>=4), so 101 is evicted from the front. 105 inserts;
+size stays at 4. The capacity bound is the safety valve here.
+Step 7: 101 arrives at ts=11. cutoff=1; front is now (102, 6); 6<1 false,
+no time-eviction; capacity-evict (102, 6). 101 inserts at the back.
+Note: 101 is novel here because it was evicted in step 6 — the dedup
+set forgets entries past the bound, and a duplicate that arrives
+beyond the bound is treated as fresh.
+Step 8: 102 arrives at ts=18. cutoff = 18-10 = 8; front is (103, 8);
+8 < 8 is false (strict less-than), no time-eviction. Size>=capacity
+(4>=4) so capacity-evict (103, 8). Now size is 3; front is (104, 9);
+9<8 false, size<capacity, loop exits. 102 inserts; final size 4.
+
+The trace shows two operationally important behaviors. First, the
+dedup is correct within the bound (step 3 catches the duplicate of
+101 that arrived 2 seconds later). Second, beyond the bound the dedup
+forgets entries (step 7's '101' is treated as novel because the entry
+was evicted in step 6). The bound-tuning is operational: window must
+be larger than the maximum re-delivery window to catch the duplicates
+that matter.
+"""
+
+[[questions]]
+id = "154c564d-8bc7-4043-8630-1f624eb37a37"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson states that Kafka's idempotent producer (`enable.idempotence=true`)
+is partition-scoped and single-producer scoped. SDA's pipeline keys
+every observation by `observation_id` so duplicate retries land on the
+same partition. A teammate proposes also enabling cross-partition
+idempotency by using Kafka's transactional producer
+(`transactional.id` set, transactional sends + commits). Why is the
+lesson's recommendation to stay with the simpler partition-scoped
+idempotency for SDA?
+"""
+answer.answer = "Cross-partition idempotency requires Kafka transactions, which add coordinator overhead, latency (typically 10-50ms per transaction commit), and operational complexity (transaction state machines, txn-coordinator failure modes, reading transactional vs non-transactional consumers). For SDA's pipeline the cross-partition guarantee is unnecessary because every observation is keyed on observation_id and routed to its partition by hash; duplicates of the same observation always land on the same partition, where the partition-scoped idempotent producer dedups them. The transactional producer's value is for cross-topic atomicity (Kafka Streams' read-process-write loops) which the SDA pipeline does not need. Simpler is better when the simpler shape is sufficient."
+prompt.distractors = [
+    "Kafka transactions are not durable across broker restarts; the coordinator's transaction state is in-memory only. The partition-scoped idempotent producer is durable because the broker persists the producer-id+sequence state to disk",
+    "Cross-partition transactional producers cannot be combined with watermarks (Module 3) because the transaction's write set includes both the data and the watermark, and a transaction abort would orphan the watermark. Partition-scoped idempotency does not have this issue",
+    "The Java client's transactional producer has known correctness bugs; the rdkafka Rust client does not implement transactional producers at all. Partition-scoped is the only choice in Rust",
+]
+context = """
+The complexity-vs-need framing is the right answer. Cross-partition
+transactions are real and have real value, but they cost more than
+partition-scoped idempotency in latency and operational complexity.
+For SDA's keyed-by-observation_id traffic, every duplicate of a given
+observation lands on the same partition by hash routing — the partition-
+scoped guarantee is sufficient. Reaching for transactions where they
+are not needed adds operational surface area without payback. The
+distractors invent properties that don't exist: Kafka's transaction
+coordinator does persist state durably; transactions compose cleanly
+with watermarks (the transaction's atomic visibility is what makes
+this work); rdkafka does support transactional producers (and has
+done so for years). The lesson's pattern: choose the simplest
+mechanism that gives the guarantee the workload needs.
+"""
+
+[[questions]]
+id = "b59815c8-1d82-46c0-bc69-83625d0747e5"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson distinguishes 'where the exactly-once-effective guarantee
+holds' from 'where it does not.' For each of the following SDA sinks,
+which is the right characterization per the lesson?
+
+  (i) `INSERT ... ON CONFLICT (observation_id) DO NOTHING` to a Postgres
+      observations table.
+  (ii) HTTP POST to a partner's webhook endpoint that triggers an email
+       to a human operator (no Idempotency-Key header in the request).
+  (iii) A Kafka producer with enable.idempotence=true emitting
+        ConjunctionRisk events to a downstream topic.
+  (iv) The conjunction-alert subscriber that fires a satellite avoidance
+       maneuver, with a recently-seen-alert-ids set in the subscriber's
+       memory.
+"""
+answer.answer = "Holds for (i), (iii), (iv); does not hold for (ii). (i) is idempotent by the SQL ON CONFLICT clause. (iii) is idempotent by Kafka's PID + sequence-number broker-side dedup. (iv) is idempotent because the subscriber stores recently-seen alert IDs and ignores duplicates — the boundary's owner has implemented dedup. (ii) does not hold because the partner's webhook endpoint has no idempotency mechanism: each POST triggers an email regardless of whether it is a duplicate. The lesson's pattern says the boundary owner must implement dedup for the guarantee to extend across the boundary; here the boundary owner has not, so duplicates produce duplicate emails."
+prompt.distractors = [
+    "Holds for all four. The pipeline's at-least-once + idempotency frame extends to every downstream because the pipeline emits keys (observation_id) that any downstream can use to dedup",
+    "Holds only for (i) and (iii). HTTP boundaries cannot be idempotent because HTTP is fundamentally request-response without coordination state. The fix for (iv) is to use Kafka instead of an in-memory subscriber set",
+    "Holds for (iii) only. Application-layer dedup (i, iv) does not produce true exactly-once because a process restart loses the seen-set; only Kafka's broker-side dedup is durable enough to count",
+]
+context = """
+The boundary-by-boundary discipline is the right framing. (i), (iii),
+and (iv) each implement idempotency at their boundary in some form:
+SQL ON CONFLICT, Kafka idempotent producer, in-memory seen-set. (ii)
+does not implement idempotency — the partner's webhook does not look
+at any header that would distinguish duplicate from original. The
+lesson's framing: pipeline emits the key; boundary owner uses the
+key for dedup; boundaries that don't dedup produce duplicate effects.
+The 'all four' distractor mistakes the pipeline's responsibility for
+the boundary's responsibility. The 'HTTP can't be idempotent'
+distractor is wrong as a generality (HTTP supports Idempotency-Key
+by convention; the partner just does not implement it). The 'only Kafka
+counts' distractor over-restricts to a specific mechanism; in-memory
+seen-sets are valid as long as they handle restart correctly (which
+M5 L3's checkpointing addresses).
+"""
