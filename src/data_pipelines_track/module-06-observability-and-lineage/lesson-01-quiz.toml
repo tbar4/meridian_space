@@ -1,0 +1,183 @@
+[[questions]]
+id = "ef60917d-e7b5-423e-af23-53ba33384ea8"
+type = "MultipleChoice"
+prompt.prompt = """
+For each of the following pipeline measurements, which Prometheus
+metric type from the lesson is correct?
+
+  (a) The number of conjunction alerts emitted since the pipeline started.
+  (b) The current occupancy of the channel between the correlator and
+      the alert sink (out of capacity 4096).
+  (c) The per-event latency from observation arrival to alert emission,
+      with P99 queryable from the dashboard.
+  (d) The current value of the pipeline's downstream watermark, in
+      Unix-seconds.
+"""
+answer.answer = "(a) Counter — cumulative monotonically-increasing count of alerts. (b) Gauge — current state value that goes up and down. (c) Histogram — distribution that supports percentile queries. (d) Gauge — instantaneous value of the watermark, which advances forward but is reported as a current state, not as a counter (a counter would conflate the watermark's value with how many times it has advanced)."
+prompt.distractors = [
+    "All four are gauges. The pipeline's metrics endpoint reports current values for all signals; counters and histograms are abstractions that the dashboard derives from a series of gauge samples",
+    "(a) Histogram (so the dashboard can show alert-rate distribution), (b) Counter (channel occupancy is a cumulative measurement of items processed), (c) Gauge (latency is a current value), (d) Counter (watermark advances are cumulative)",
+    "(a) Gauge, (b) Gauge, (c) Gauge, (d) Counter. The dashboard's percentile widget can compute P99 from a series of gauge samples without needing a histogram type",
+]
+context = """
+The lesson's framing of metric types is question-shape-driven. Counters
+are for cumulative event counts where the rate over time is what
+matters; gauges are for instantaneous values that can go up and down;
+histograms are for distributions that support percentile queries.
+The watermark IS a number that advances, but it is the current
+position, not the number of advances — so gauge, not counter. The
+'all gauges' answer collapses the type system to a single shape and
+loses the dashboard's ability to query percentiles natively. The
+'mostly inverted' answer demonstrates why wrong types produce
+misleading dashboards: a histogram of cumulative counts is meaningless;
+a counter on a channel-occupancy that goes up and down is worse than
+useless. The 'compute P99 from gauge samples' answer is technically
+possible but operationally wrong — the histogram bucket structure is
+what makes percentile queries efficient at dashboard scale; a series
+of point-in-time gauge samples gives unreliable percentiles.
+"""
+
+[[questions]]
+id = "2d60c485-2458-4ecf-b585-2dd9fbccff22"
+type = "MultipleChoice"
+prompt.prompt = """
+The dashboard panel for the SDA pipeline shows: throughput steady
+at 9,000 events/sec (nominal range), P99 alert latency steady at 2.3
+seconds (well under the 30-second SLO), error rate at zero. A separate
+panel shows source_lag_seconds{source=\"optical\"} P99 at 240 seconds
+and rising. The on-call engineer's first hypothesis should be?
+"""
+answer.answer = "The optical archive partner is producing events faster than the pipeline's optical source operator is consuming them, OR the partner's API has slowed down. The pipeline itself is healthy (throughput, latency, errors all nominal); the lag spike is exclusively on the source side. The pipeline is processing optical events fine but the events being processed are 240 seconds old in event time. Investigation: check the optical source operator's request rate vs the partner's documented capacity, check the partner's status page, check the optical source's HTTP poll latency for elevated values."
+prompt.distractors = [
+    "The pipeline is healthy and the dashboard is misconfigured; source_lag_seconds is a derived metric that fluctuates based on dashboard scrape timing and is not a real signal. Investigation: check the dashboard's panel definition for unit errors",
+    "There is a memory leak in the optical source operator that is causing it to fall behind on event time without affecting throughput. Investigation: check the operator's resident memory growth in the runtime metrics",
+    "The pipeline's watermark has stalled, which is causing windowed operators to hold events longer than expected. The lag is the held-event accumulation. Investigation: check the watermark gauge for stalls",
+]
+context = """
+The lesson's framing is direct: lag isolates the source side from
+the pipeline side. The throughput, latency, errors metrics are all
+pipeline-side signals; if they are nominal, the pipeline is processing
+correctly. The lag spike on source side means the events being
+processed are old — the cause is upstream of ingestion (the partner's
+API, the network path between the partner and the radar's optical
+archive endpoint, the partner's deployment that slowed their response
+times). The first investigation step is to confirm the diagnosis with
+partner-side data, not to reach into the pipeline's internals. The
+distractors invent unrelated mechanisms: source_lag is a real metric
+not a dashboard artifact; memory leaks would show in throughput
+degradation; watermark stalls would show in pipeline-side lag, not
+source-side. The lesson's pattern: split lag tells you 'is it ours or
+theirs' — the answer here is theirs.
+"""
+
+[[questions]]
+id = "036be3a4-0d6b-4fb2-8e43-02791f565600"
+type = "Tracing"
+prompt.program = """
+// Compute SLO compliance over a rolling sample of latencies.
+// SLO target: 30.0 seconds. We compute the fraction of samples
+// at or below the target. This is the SLI value; the SLO is
+// 'compliance >= 0.999'.
+
+fn main() {
+    // 20 samples of P99 latency observations from the pipeline.
+    // Most are well under target; a few breach.
+    let samples_secs = [
+        2.1, 3.4, 1.8, 2.5, 4.1, 2.9, 5.0, 3.2, 1.5, 2.8,
+        45.0, 3.1, 2.6, 4.5, 3.0, 2.7, 31.5, 2.4, 1.9, 3.6
+    ];
+    let target_secs = 30.0_f64;
+    let total = samples_secs.len() as f64;
+    let breaching = samples_secs.iter().filter(|&&s| s > target_secs).count() as f64;
+    let compliant = total - breaching;
+    let compliance = compliant / total;
+
+    println!("total={} breaching={} compliant={}", total as u32, breaching as u32, compliant as u32);
+    println!("compliance_ratio={:.4}", compliance);
+    let slo_target = 0.999_f64;
+    let met = compliance >= slo_target;
+    println!("slo_target={:.4} met={}", slo_target, met);
+}
+"""
+answer.doesCompile = true
+answer.stdout = """total=20 breaching=2 compliant=18
+compliance_ratio=0.9000
+slo_target=0.9990 met=false"""
+context = """
+The trace exercises the SLO compliance computation. Of 20 samples,
+2 (45.0s and 31.5s) exceed the 30s target; 18 are compliant. The
+compliance ratio is 18/20 = 0.9 (90%). The SLO target is 0.999
+(99.9%); 0.9 < 0.999, so the SLO is not met (`met=false`).
+
+The pedagogical point: a 90% compliance ratio sounds good casually
+but a 99.9% SLO target requires only ~2 breaches per 1000 samples,
+not 2 per 20. The SLO discipline forces the team to reason about
+the *tails* of the distribution rather than averages or medians. The
+two breach values (45s and 31.5s) are likely from rare events — a
+deploy, a partner blip, a cold-start from a checkpoint — and the
+SLO's 0.999 budget defines how rare 'rare' must be. Production code
+runs this computation continuously over the rolling window (typically
+30 days for an SLO; 1 hour for the alerting variant) and emits the
+compliance_ratio as a gauge that the dashboard's SLO panel reads.
+"""
+
+[[questions]]
+id = "b21e6f76-71be-44c4-a541-533db2697e04"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson recommends tracking SLI, SLO, and SLA separately rather
+than collapsing them into a single number. A teammate proposes
+combining the three: 'we have one SLA in our contract, so let's just
+alert on the SLA value and stop tracking the SLO and SLI separately.'
+What does the lesson say about why the three layers exist?
+"""
+answer.answer = "The SLA is the external commitment; the SLO is the internal target that is tighter than the SLA so that internal slack absorbs SLO slips before they become SLA breaches; the SLI is the actual measurement. Alerting on the SLA means alerting only when the contractual obligation is at risk, by which point operations is in an emergency. Alerting on the SLO is the proactive equivalent: the team is alerted while the SLI is degrading toward the SLO target, with budget remaining before the SLA threshold. Collapsing the three loses this layered protection — the SLI stops being measured separately, the team can't reason about the gap between internal target and external commitment, and alerts only fire at SLA-violation severity."
+prompt.distractors = [
+    "Tracking three layers is a documentation pattern; operationally the SLA is the only number that matters because it is the contractual commitment. The other two are reference values for engineering discussions",
+    "The three layers exist for compliance with ISO 9001 quality management standards; SLAs without internal SLOs and SLIs do not satisfy the audit requirements. The pipeline's track record is what motivates the layered tracking",
+    "The three layers correspond to different stakeholders (engineering, product, customers); each stakeholder reads a different number. The team should consolidate to whichever stakeholder is the primary audience",
+]
+context = """
+The protective-layering framing is the lesson's intent. The SLO is
+deliberately tighter than the SLA so the team has internal budget to
+absorb minor slips. Alerting on the SLO surfaces problems while
+budget remains; alerting on the SLA surfaces problems when the
+budget is gone and the external commitment is at risk. The
+distractors miss the operational point. The 'documentation pattern'
+answer treats the three as labels rather than as alerting thresholds.
+The 'ISO 9001' answer is invented (no such requirement exists). The
+'stakeholders' answer mixes audience with severity tiers; in practice
+all three numbers serve the same audience (operations) but at
+different urgency levels.
+"""
+
+[[questions]]
+id = "4b8bc125-37fe-4cf5-b425-08586277791f"
+type = "MultipleChoice"
+prompt.prompt = """
+A teammate writes a custom 'live operator metric' that increments
+on every event and decrements when the operator finishes processing,
+with the intent of using it as 'in-flight events' on the dashboard.
+They use a Counter type. The dashboard panel ends up showing
+ever-growing values that don't reflect the actual in-flight count.
+What is the lesson's framing of the bug?
+"""
+answer.answer = "Counters are monotonically increasing — they cannot decrement. The teammate's increment-then-decrement pattern is the wrong shape for a counter; the metric should be a Gauge, which supports up-and-down values. The dashboard's ever-growing display is showing the cumulative sum of increments without the cancellation that decrements would provide; on a Gauge, the same operations would produce the actual current count of in-flight events. The lesson's pattern: choose the metric type that matches the question being asked. 'How many are in flight right now' is a current-state question (Gauge); 'how many have we ever processed' is a cumulative question (Counter)."
+prompt.distractors = [
+    "Counters CAN decrement via the metrics::counter!(...).decrement(N) call, but the Prometheus dashboard treats them as monotonic and ignores the decrements; switch to a different visualization that respects decrements",
+    "The teammate's metric needs to use Histogram type with the in-flight count as the value; histograms support both increment and decrement and the dashboard can compute current count via percentile=1.0 (the maximum)",
+    "Counters work for this case but require a separate 'reset' metric to be emitted at restart; without the reset, the cumulative-since-process-start display is correct but unhelpful for the in-flight question",
+]
+context = """
+The wrong-type framing is the right answer. Counters are
+monotonically-increasing by Prometheus convention; the prometheus
+crate's counter type does not support decrement at all (the metrics
+crate's macro for counter increment exists; decrement does not).
+The right type for in-flight count is Gauge, which the lesson
+recommends for current-state questions. The other distractors invent
+properties that don't exist: counters cannot decrement; histograms
+are for value distributions, not in-flight counts; counter resets at
+process start are the documented behavior, not a bug to work around.
+The lesson's discipline: match metric type to question shape; in-
+flight count is a question about *now*, so Gauge.
+"""

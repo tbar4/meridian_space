@@ -99,3 +99,8 @@
   - [Checkpointing](./data_pipelines_track/module-05-delivery-guarantees-and-fault-tolerance/lesson-03-checkpointing.md)
   - [Dead Letter Queues](./data_pipelines_track/module-05-delivery-guarantees-and-fault-tolerance/lesson-04-dead-letter-queues.md)
   - [Project: Exactly-Once Conjunction Alert Pipeline](./data_pipelines_track/module-05-delivery-guarantees-and-fault-tolerance/project-exactly-once-alerts.md)
+- [Module 6: Observability and Lineage](./data_pipelines_track/module-06-observability-and-lineage/README.md)
+  - [Pipeline Metrics](./data_pipelines_track/module-06-observability-and-lineage/lesson-01-pipeline-metrics.md)
+  - [Data Lineage](./data_pipelines_track/module-06-observability-and-lineage/lesson-02-data-lineage.md)
+  - [Debugging Under Load](./data_pipelines_track/module-06-observability-and-lineage/lesson-03-debugging-under-load.md)
+  - [Project: Observability Stack](./data_pipelines_track/module-06-observability-and-lineage/project-observability-stack.md)
