@@ -1,0 +1,188 @@
+[[questions]]
+id = "cb8cf55a-4c59-4f0b-bf85-bc8e8f707d51"
+type = "MultipleChoice"
+prompt.prompt = """
+Which of the following best captures the formal meaning of a watermark
+of value t in the lesson's framing?
+"""
+answer.answer = "A guarantee that no event with event_time < t will arrive at this point in the pipeline after this watermark. The watermark is a contract from upstream to downstream — the downstream operator can act on it (close windows, emit results, evict state) confident that the contract will hold."
+prompt.distractors = [
+    "An estimate that no event with event_time < t is *likely* to arrive after this point. The downstream operator uses the estimate to size its allowed-lateness window and decide whether to close speculatively or wait",
+    "A heartbeat indicating the source is still alive and producing as of wall-clock time t. The downstream operator uses it to detect stalled sources and initiate failover",
+    "The maximum event_time observed in the source's recent window. The downstream operator interprets it as 'the source's current view of where it is in the data.'",
+]
+context = """
+The watermark is a guarantee, not an estimate or a heartbeat. The
+lesson is precise about this because the difference matters: the
+downstream operator's correctness depends on being able to act on
+the watermark as a contract. If a source emits a watermark and then
+emits an event with event_time < watermark, the source has violated
+the protocol; the operator may treat this as a bug. The 'estimate'
+distractor weakens the watermark to something downstream cannot rely
+on; the 'heartbeat' distractor confuses watermarks with liveness
+signals (they are different signals in real systems); the 'observed
+max' distractor describes a related but distinct quantity (the source
+emits max-observed minus max-lateness, not max-observed itself).
+"""
+
+[[questions]]
+id = "5d264409-a1bc-4edf-948c-9cd9889389ec"
+type = "MultipleChoice"
+prompt.prompt = """
+The SDA pipeline has three sources with the per-source max-lateness
+values from the lesson: radar 100ms, optical 30s, ISL 10s. After all
+three sources have been running for a while and have observed events
+at the same event-time T, what is the value of the downstream
+watermark at the normalize fan-in?
+"""
+answer.answer = "T - 30s, dominated by the optical source. The min-of-inputs rule produces min(T - 100ms, T - 30s, T - 10s) = T - 30s. Tightening the radar's or ISL's max-lateness changes nothing for the downstream watermark; only tightening the optical source's polling cadence (and thus its max-lateness) lowers it."
+prompt.distractors = [
+    "T - 100ms, the most aggressive of the three. The min-of-inputs rule selects the most precise upstream guarantee since that is the strongest claim available",
+    "T - (100ms + 30s + 10s) = T - 40.1s. Watermarks compose additively across inputs since each input's lateness contributes to the total uncertainty",
+    "T - 10s, the median of the three. Selecting the median rather than the min produces a balanced tradeoff between aggressive close and accommodating slow sources",
+]
+context = """
+The min-of-inputs rule is the only correct propagation: we can only
+guarantee what the worst upstream guarantees. Selecting the most
+precise (max instead of min) would make claims downstream that the
+slow source cannot back up — a violation of the protocol. Adding
+latencies treats them as accumulating uncertainties, which is wrong;
+each watermark is independent, and the output is bounded by the worst
+input. The median choice is invented; there is no median rule. The
+operational consequence the lesson called out — the slow source
+dominates — is exactly this scenario: tightening anyone but the
+slowest does nothing for the downstream.
+"""
+
+[[questions]]
+id = "4061a3b3-057c-44b7-a35b-2d1b99529d59"
+type = "Tracing"
+prompt.program = """
+// Min-of-inputs watermark propagation for a 3-input fan-in.
+// Each entry in the `events` list is (input_index, watermark_value).
+// On each event, update the per-input watermark and recompute the
+// downstream watermark. Print the downstream watermark whenever it
+// strictly advances, or "(holding)" if not enough inputs have reported
+// to define a min, or "(no advance)" if the new min equals the last
+// emitted value.
+
+fn main() {
+    let n = 3;
+    let mut input_wm: Vec<Option<u64>> = vec![None; n];
+    let mut last_emitted: Option<u64> = None;
+    let events: Vec<(usize, u64)> = vec![
+        (0, 100),
+        (1, 90),
+        (2, 80),
+        (0, 110),
+        (2, 95),
+        (1, 105),
+        (2, 120),
+    ];
+
+    for (i, &(idx, wm)) in events.iter().enumerate() {
+        input_wm[idx] = Some(wm);
+        let all_reported = input_wm.iter().all(|w| w.is_some());
+        let status = if !all_reported {
+            "(holding)".to_string()
+        } else {
+            let min_wm = input_wm.iter().map(|w| w.unwrap()).min().unwrap();
+            if Some(min_wm) > last_emitted {
+                last_emitted = Some(min_wm);
+                format!("emit {}", min_wm)
+            } else {
+                "(no advance)".to_string()
+            }
+        };
+        println!("step={} input={} wm={} -> {}", i + 1, idx, wm, status);
+    }
+}
+"""
+answer.doesCompile = true
+answer.stdout = """step=1 input=0 wm=100 -> (holding)
+step=2 input=1 wm=90 -> (holding)
+step=3 input=2 wm=80 -> emit 80
+step=4 input=0 wm=110 -> (no advance)
+step=5 input=2 wm=95 -> emit 90
+step=6 input=1 wm=105 -> emit 95
+step=7 input=2 wm=120 -> emit 105"""
+context = """
+Trace through. Steps 1-2: only input 0 and 1 have reported, so the min
+is undefined; output holds. Step 3: input 2 reports 80; all inputs are
+in. min(100,90,80)=80; emit 80. Step 4: input 0 reports 110, but
+input_wm becomes [110,90,80]; min is 80, same as last emitted; no
+advance. Step 5: input 2 reports 95, input_wm=[110,90,95]; min is 90;
+since last emitted was 80, this strictly advances; emit 90. Step 6:
+input 1 reports 105, input_wm=[110,105,95]; min is 95; advances; emit
+95. Step 7: input 2 reports 120, input_wm=[110,105,120]; min is 105;
+advances; emit 105. The trace shows two operationally important
+properties: (a) the downstream is held until every input has reported
+at least once (steps 1-2), and (b) the downstream advances only when
+the minimum strictly advances, which means the slowest input is what
+drives advancement. Step 4's 'no advance' despite a new high watermark
+on input 0 is the specific case where improving a non-slowest input
+does nothing for the downstream — exactly the lesson's operational
+property.
+"""
+
+[[questions]]
+id = "5f05a3a5-1b43-4e13-bfb8-e526a484520c"
+type = "MultipleChoice"
+prompt.prompt = """
+The optical archive's polling cadence is being upgraded from 30 seconds
+to 5 seconds (the partner has built a push-on-update mechanism). The
+team plans to update the optical source's max_lateness from 30s to 5s.
+What is the operational impact on the downstream watermark, assuming
+radar (100ms) and ISL (10s) are unchanged?
+"""
+answer.answer = "The downstream watermark moves from being optical-dominated (T-30s) to ISL-dominated (T-10s). The change tightens the watermark by 20 seconds. Downstream window-close decisions happen 20 seconds earlier, lowering pipeline latency by that much. The next bottleneck is now the ISL beacon's 10s lateness; further investment in ingestion-tier latency would target that source."
+prompt.distractors = [
+    "The downstream watermark improves to T-100ms, matching the radar's value, because the optical change unlocks the most aggressive upstream guarantee",
+    "The downstream watermark improves by exactly 25s — the average of the three sources' max-lateness values is lowered by the optical change in proportion to its weight",
+    "The downstream watermark stays at T-30s. Watermarks are dominated by historical worst-case lateness, not by current configured values; the new 5s value would only take effect after a multi-day rolling-window observation period",
+]
+context = """
+The min-of-inputs rule means changing any one input's max-lateness
+moves the downstream watermark only if that input was the dominant
+(slowest) one. Optical was at T-30s and was dominant; tightening it to
+T-5s makes it no longer dominant, and the new dominant input is ISL
+at T-10s. The downstream watermark is now T-10s — a 20-second
+improvement. The 'matches the most aggressive' distractor inverts the
+rule (min, not max). The 'average' distractor invents a weighted-
+combination that does not exist. The 'historical-rolling-window'
+distractor invents a slow-update mechanism; in reality, the watermark
+reflects current configuration immediately on the next watermark item.
+The lesson's operational property — only improvements to the slowest
+source matter — is exactly visible in this scenario.
+"""
+
+[[questions]]
+id = "a45e5dd8-53dd-4de9-93b6-fab6cf279928"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson's `enum SourceItem { Observation(_), Watermark(_) }` interleaves
+data items with watermark items on the same channel. A teammate proposes
+splitting them: a separate `mpsc::channel<Watermark>` carrying only
+watermarks, alongside the existing data channel. Why does the lesson
+prefer in-band interleaving?
+"""
+answer.answer = "In-band interleaving preserves the temporal ordering between watermarks and the data items they bound. A watermark of value t sent after observations with event_time ≤ t is a valid claim by definition; the channel's FIFO order ensures the downstream sees the watermark only after it has seen those observations. With separate channels, a fast data channel can out-pace a slow watermark channel — the downstream sees a watermark of value t before it has consumed the observations with event_time ≤ t that the watermark is bounding, producing apparent watermark regressions and unsafe close decisions."
+prompt.distractors = [
+    "In-band interleaving uses fewer file descriptors per pipeline edge; with N data channels and N watermark channels, the orchestrator hits the process FD limit on topologies with hundreds of edges",
+    "Separate watermark channels require a different mpsc::Sender clone strategy, which conflicts with the OperatorGraph's single-sender-per-edge invariant from Module 2",
+    "In-band interleaving is required by the watermark protocol's monotonicity guarantee; on separate channels, watermarks could arrive out of order and break monotonic advancement",
+]
+context = """
+The temporal-ordering argument is the right one. In-band channels are
+FIFO, so the watermark's relationship to the data items it bounds is
+preserved by the channel mechanics. Out-of-band channels offer no such
+guarantee — the data channel and the watermark channel are scheduled
+independently by the runtime, and a fast data path with a slow watermark
+path produces the apparent-regression bug the lesson warns about. The
+FD distractor is invented (the per-channel FD cost is negligible). The
+OperatorGraph distractor invents a constraint that does not exist
+(the graph would have no trouble representing dual channels). The
+monotonicity distractor confuses two things: monotonic advancement is
+a per-source property of the values; in-band ordering is about the
+relationship between watermarks and data, not about value ordering.
+"""
