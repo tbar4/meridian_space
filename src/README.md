@@ -32,7 +32,7 @@ Async Rust, concurrency, message passing, networking, data layout, and performan
 
 A storage engine for the Orbital Object Registry — the system of record for every tracked orbital object, its TLE history, and the conjunction analyses computed against it. Modules cover page-level storage and the buffer pool, B+ tree indexes, LSM trees and compaction, write-ahead logging and crash recovery, transactions and isolation levels, and query processing with the Volcano model. The capstone projects compose into a working single-node OLTP storage engine over the course of the track.
 
-### Data Pipelines — Space Domain Awareness Fusion *(in progress — Module 1 shipped)*
+### Data Pipelines — Space Domain Awareness Fusion *(shipped)*
 
 Real-time sensor fusion across radar, optical, and inter-satellite link feeds, producing the conjunction alerts that flight ops acts on. Modules cover stream processing semantics, pipeline orchestration internals, watermarks and event-time, exactly-once delivery, and backpressure. The mission framing is the SDA Fusion service that ingests tens of thousands of observations per second from heterogeneous sources and emits a unified, deduplicated catalog.
 
