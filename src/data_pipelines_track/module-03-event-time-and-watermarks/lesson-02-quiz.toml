@@ -1,0 +1,181 @@
+[[questions]]
+id = "4121e333-0b4b-4441-a9d5-66335a9679b1"
+type = "MultipleChoice"
+prompt.prompt = """
+The conjunction-risk operator must answer 'for each new observation,
+which other observations of the same orbital object are within 30
+seconds of event time?' Which window shape from the lesson is the
+right primitive for this question, and why?
+"""
+answer.answer = "Per-event sliding windows. The question is naturally framed as 'find observations within W of *this* event_time' for every event; per-event sliding windows materialize exactly that set as a deque per key, with on-each-event front eviction keeping the deque always sized to the current window. Tumbling windows would silently miss matches that straddle a tumbling-bucket boundary; hopping windows would scatter the same event across multiple windows and require expensive cross-window deduplication; session windows would conflate events from temporally-close-but-distinct conjunctions because they have no fixed-size cap."
+prompt.distractors = [
+    "Tumbling windows of 30 seconds. They produce non-overlapping buckets that bound memory tightly, and the conjunction operator just needs to compare events within each bucket; the boundary-straddling case is rare enough to ignore",
+    "Hopping windows of 30 seconds with a 5-second step. The 6-fold overlap guarantees every conjunction is captured in at least one window, and downstream deduplication on conjunction ID handles the duplicate emissions",
+    "Session windows with a 30-second gap timeout. The gap timeout matches the conjunction window size, and sessions naturally collect events that are temporally proximate, which is what the conjunction question asks",
+]
+context = """
+The question's phrasing — 'for each new observation, find others within
+W of its event_time' — is exactly what sliding windows materialize.
+Tumbling windows produce buckets that boundaries can fall across, and
+'rare enough to ignore' is the kind of reasoning that produces silent
+correctness bugs. Hopping with deduplication works in principle but
+duplicates the per-event work by 6x and requires another correctness
+piece (the dedup on conjunction ID, with its own window-state to
+manage) to recover the right answer; sliding windows give the right
+answer directly. Session windows with a 30-second gap are the worst
+fit: they merge unrelated conjunctions whose events happen to fall
+within 30 seconds of each other into a single session, and the gap-
+based close is at the wrong granularity for SDA's correlation question.
+The lesson's framing — match the window shape to the question shape —
+is precise: the sliding-window primitive matches the conjunction
+question structurally.
+"""
+
+[[questions]]
+id = "c79bd213-9e0c-4166-93fe-b3ece38bf210"
+type = "Tracing"
+prompt.program = """
+// Sliding-window per-event eviction simulation. Window size: 5 seconds.
+// Events are pushed to the back; on each push, the front is evicted
+// while front.sensor_ts < (current.sensor_ts - 5). At each step, print
+// the deque's contents (just sensor_ts values) after eviction + push.
+
+use std::collections::VecDeque;
+
+fn main() {
+    let window_secs: u64 = 5;
+    // Events arriving in event-time order with their sensor timestamps.
+    let events: [u64; 6] = [10, 12, 14, 16, 19, 25];
+    let mut deque: VecDeque<u64> = VecDeque::new();
+
+    for &ts in events.iter() {
+        // Front-evict while front older than (ts - window).
+        let cutoff = ts.saturating_sub(window_secs);
+        while let Some(&front) = deque.front() {
+            if front < cutoff {
+                deque.pop_front();
+            } else {
+                break;
+            }
+        }
+        deque.push_back(ts);
+        let contents: Vec<String> = deque.iter().map(|t| t.to_string()).collect();
+        println!("ts={} window=[{}]", ts, contents.join(","));
+    }
+}
+"""
+answer.doesCompile = true
+answer.stdout = """ts=10 window=[10]
+ts=12 window=[10,12]
+ts=14 window=[10,12,14]
+ts=16 window=[12,14,16]
+ts=19 window=[14,16,19]
+ts=25 window=[25]"""
+context = """
+Trace step-by-step. ts=10: cutoff=5, deque empty, push: [10]. ts=12:
+cutoff=7, front=10≥7 break, push: [10,12]. ts=14: cutoff=9, front=10≥9
+break, push: [10,12,14]. ts=16: cutoff=11, front=10<11 evict, front=12≥11
+break, push: [12,14,16]. ts=19: cutoff=14, front=12<14 evict, front=14≥14
+break (strict less-than), push: [14,16,19]. ts=25: cutoff=20, front=14<20
+evict, front=16<20 evict, front=19<20 evict, deque empty, push: [25].
+The lesson's 'on-each-event front eviction keeps the deque always sized
+to the current window' is exactly what the trace shows: the deque
+contents at every step are precisely the events whose sensor_timestamp
+is within 5 seconds of the most recent. The strict less-than (`<`) at
+the cutoff is what keeps events at exactly the window boundary
+(ts=19, cutoff=14) included.
+"""
+
+[[questions]]
+id = "24fa8196-ca2f-4140-9329-4e8472c689bb"
+type = "MultipleChoice"
+prompt.prompt = """
+The TumblingWindow operator from the lesson uses BTreeMap<SystemTime,
+Vec<Observation>> keyed on window end. A teammate proposes switching to
+HashMap<u64, Vec<Observation>> keyed on a window index integer, citing
+HashMap's O(1) insertion vs BTreeMap's O(log N). What is the strongest
+argument the lesson makes against this swap?
+"""
+answer.answer = "The hot path on watermark advance is `close_up_to(T)` — find every window whose end ≤ T and emit it. BTreeMap supplies this as a single O(log N) range/split operation; HashMap requires a full O(N) scan over every window every time the watermark advances. With watermarks advancing many times per second and N growing into the hundreds of windows, the HashMap variant's per-event cost grows linearly in the open-window count, which dominates the runtime. The O(log N) BTreeMap insert is paid back many times over by the cheap range-prefix close."
+prompt.distractors = [
+    "BTreeMap is required for correctness because window-end timestamps need ordered iteration to emit results in chronological order; HashMap would emit results in random order, breaking downstream sinks that assume ordered input",
+    "BTreeMap's underlying B-tree structure is cache-friendlier than HashMap's hash table for the access patterns of windowing, even though both have similar asymptotic costs; the constant-factor difference is what matters in production",
+    "HashMap's O(1) insertion is a worst-case O(N) under hash collisions; BTreeMap's O(log N) is deterministic regardless of input distribution. For a windowing operator, deterministic timing matters more than amortized speed",
+]
+context = """
+The lesson is explicit about this: choose data structures whose hot-
+path operations are cheap. The hot path on watermark advance is the
+prefix range query (windows with end ≤ T), which BTreeMap does in
+O(log N) and HashMap does in O(N). At hundreds of open windows and
+many watermark advances per second, the HashMap variant's cost is
+catastrophic. The ordered-output distractor is wrong: ordering of
+emissions is a separate concern that the operator could enforce by
+sorting the emit batch (cheap); the issue with HashMap is the cost
+of finding which windows to emit, not the order of emitting them.
+The cache-friendliness distractor is true in some narrow benchmarks
+but irrelevant here — the asymptotic O(N) vs O(log N) gap dominates
+constant-factor effects long before they become measurable. The
+deterministic-timing distractor invents a property that is not the
+real concern.
+"""
+
+[[questions]]
+id = "321a26d7-69df-4226-b98f-24843fad0534"
+type = "MultipleChoice"
+prompt.prompt = """
+A satellite's beacon source uses session windows with a 30-second gap
+timeout to bound 'one orbital pass.' The implementation has only the
+gap timeout — no max session duration. Production deploys the operator;
+within an hour, the operator's memory grows to hundreds of MB. What
+went wrong, and what is the lesson's recommended fix?
+"""
+answer.answer = "A satellite's continuous beacon emission during a long pass (or a misconfigured beacon that emits without gaps) produces events that arrive within the 30-second gap of each other indefinitely. The gap-only close trigger never fires; the session grows for the full duration of the issue. The lesson's fix is the double-bound: combine the gap timeout with a hard max-session-duration (say, 15 minutes for SDA's typical pass length). Even if events keep arriving inside the gap, the max-duration safety valve force-closes the session and frees its state."
+prompt.distractors = [
+    "The gap timeout is too long; reducing it to 5 seconds would force more frequent closes and bound memory. The 30-second timeout is a misconfiguration, not a structural issue with the operator",
+    "Session windows must be implemented with a tumbling fallback: every fixed interval, force-close all sessions and start fresh. The lesson's recommended pattern is hybrid session + tumbling rather than pure session",
+    "Session windows are inherently unsafe in production and should not be used for the beacon-pass case. The lesson recommends sliding windows of 15 minutes per satellite as the correct primitive",
+]
+context = """
+The double-bound is the production-safety pattern the lesson called
+out specifically. A gap-only session window is correct for sources
+that genuinely have gaps (a user web session, a discrete satellite
+pass with a clear horizon-loss boundary). It becomes unsafe the moment
+a source can produce continuous events — and 'a source can produce
+continuous events' is true of every real-world source under at least
+some failure mode (stuck firmware, misconfiguration, intentional dense
+emission during an event). The max-session bound is the safety valve
+that always fires. The 'tighten the gap' answer doesn't fix the
+structural issue (a continuous source still never sees a gap). The
+'hybrid with tumbling' and 'use sliding instead' answers reject
+session windows entirely; the lesson's argument is more measured —
+session windows are fine when properly bounded, and the bound is what
+makes them safe.
+"""
+
+[[questions]]
+id = "b22d45e4-2b9d-46c5-9cac-38fb2db09c73"
+type = "MultipleChoice"
+prompt.prompt = """
+Reading the SlidingWindow operator from the lesson, what is the
+operational consequence of the eviction loop using `front.sensor_timestamp
+< cutoff` (strict less-than) rather than `<=` (less-than-or-equal)?
+"""
+answer.answer = "The strict less-than keeps events at exactly the window boundary included. For a 30-second window and a current event at sensor_timestamp T, the cutoff is T-30, and any event with sensor_timestamp exactly T-30 is *retained* (not evicted) and visible in the matching set. This matches the inclusive-lower-bound convention the lesson uses for sliding windows ([T-W, T]). Using `<=` would evict the boundary event and produce a half-open window ([T-W, T)) that subtly differs in matching behavior for events that align exactly to the boundary."
+prompt.distractors = [
+    "Strict less-than prevents an off-by-one error where the deque would otherwise drop one event too many on each eviction; the `<=` variant produces a window of size W-1 in event-time terms",
+    "Strict less-than is required for cancel-safety: with `<=`, the eviction loop could drop the front while a downstream operator is reading the deque reference, producing dangling references in async iteration",
+    "Strict less-than makes the eviction a stable operation — events never re-enter the deque after eviction; with `<=`, an event whose timestamp is exactly the cutoff could be evicted and re-inserted on the next eviction pass",
+]
+context = """
+The boundary-inclusion semantics is the right answer. The convention
+the lesson uses for sliding windows is [T-W, T] (inclusive on both
+ends), and the strict less-than enforces that. With `<=`, the lower
+bound becomes exclusive ([T-W, T]) — half-open in event-time terms.
+For most workloads the difference is invisible (events almost never
+land exactly on the boundary), but for synthetic-input tests and
+edge-case correctness reasoning it matters. The off-by-one distractor
+inverts the relationship (`<` produces W-element windows, `<=` would
+produce W-1-element windows in the synthetic case where every event
+is on the boundary). The cancel-safety and stability distractors
+invent invariants that don't apply.
+"""
