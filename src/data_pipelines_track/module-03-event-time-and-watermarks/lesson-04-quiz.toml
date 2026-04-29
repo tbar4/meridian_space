@@ -1,0 +1,225 @@
+[[questions]]
+id = "63783f6c-4a83-430c-83ff-80ce18a6da25"
+type = "MultipleChoice"
+prompt.prompt = """
+The SDA pipeline emits two outputs from its windowed correlator: a
+high-frequency `events_per_minute` dashboard counter, and a
+human-actionable `conjunction_alert` that triggers avoidance maneuvers.
+For each output, which late-event strategy from the lesson is right,
+and what is the deciding consideration?
+"""
+answer.answer = "Drop for `events_per_minute` (the per-minute aggregate is statistically robust to a few late events, and the cost of carrying lateness machinery for a metric this loose is not worth it). Retract for `conjunction_alert` (a phantom alert produces a real-world action — a fuel-burning avoidance maneuver — that has lasting effects, and a late observation that invalidates the alert must produce a retraction so operators can stand down). The deciding consideration is the cost of a wrong-and-uncorrected output: low for dashboards, high for human-actionable alerts."
+prompt.distractors = [
+    "Drop for both. The lesson's general guidance is to prefer the simplest strategy unless there is a specific reason not to, and the operational cost of retraction (downstream complexity, sequence numbers, idempotent storage) outweighs the rare cases where a phantom alert needs correction",
+    "Accumulate-with-allowed-lateness for both. Allowed lateness is the middle path that handles late events without the complexity of retractions; the dashboard's lateness-tolerance is implicit, and the alert subscriber can just process re-emits as natural updates",
+    "Retract for both. The pipeline should not have multiple strategies in flight; consistency across outputs is more important than per-output optimization, and retract is the only strategy that gives strong correctness guarantees",
+]
+context = """
+The lesson's framing is per-output, not per-pipeline. The decision is
+shaped by the cost of a wrong, uncorrected emission: drop is fine when
+that cost is low (statistical aggregates, lossy dashboards); retract
+is necessary when the cost is high (alerts that produce real-world
+side effects). Accumulate-with-allowed-lateness sits between, and is
+the right shape for batched analytics where eventual completeness
+matters but downstream re-processing is cheap. The 'consistency
+trumps optimization' answer inverts the right priority — the cost
+of one wrong alert is much higher than the cost of running two
+strategies. The 'drop-both' answer underweights the cost of a
+phantom alert (a fuel-burning maneuver, possibly a satellite repositioning).
+The 'accumulate-both' answer would work for the alert in some sense
+(re-emits would replace the wrong alert) but the alert subscriber
+still saw the wrong one and may have already acted on it; only
+explicit retraction signals cleanly to the subscriber that the
+prior alert was invalidated.
+"""
+
+[[questions]]
+id = "3e0d76e7-9430-4a26-a902-bd2d24042533"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson's `AllowedLatenessWindow` operator holds state in two tiers:
+*active* (window not yet closed) and *retained* (window closed but
+holding state for late events). A teammate proposes collapsing this to
+a single tier: hold every window's state until `watermark > window_end +
+allowed_lateness`, with no separate 'closed' state. What does this
+collapse cost in observable behavior?
+"""
+answer.answer = "The single-tier collapse delays the first emission of every window by the allowed_lateness duration. With two tiers, the operator emits a window's result at `watermark > window_end` and re-emits on later late events. With one tier, the operator only emits at `watermark > window_end + allowed_lateness`, which is allowed_lateness seconds later — a strict latency penalty for every emit, even when no late events arrive. The two-tier structure is what gives the operator both early-emission for typical events AND lateness handling for the rare late ones."
+prompt.distractors = [
+    "The single-tier collapse breaks idempotency: without a clear close transition, the operator cannot generate a stable initial sequence number, and downstream retract/insert ordering becomes ambiguous",
+    "The single-tier collapse increases memory cost by holding active and retained state in the same data structure rather than two separate ones; production systems use two physical structures for this reason",
+    "The single-tier collapse is required by some streaming frameworks (Flink and Beam both use it). The two-tier structure is a Rust-specific optimization that Java-based frameworks cannot replicate due to GC behavior",
+]
+context = """
+The latency-of-first-emit is the right answer. Two tiers exist to
+separate the *first emit* (at watermark advance past window_end) from
+the *retention period* (the additional allowed_lateness during which
+late events can amend the result). Collapsing them forces every emit
+to wait for the full retention period — a strict latency penalty for
+no benefit. The two-tier structure means typical events (no lateness)
+flow through with the watermark's natural latency; rare late events
+trigger re-emits but do not delay the main path. The other distractors
+invent costs that the two-tier structure does not have. Memory is
+similar in both designs (the data is the same; the partitioning is
+just bookkeeping). Idempotency works fine in both. Flink and Beam
+both implement two-tier (or equivalent) structures internally; the
+optimization is universal, not Rust-specific.
+"""
+
+[[questions]]
+id = "00d23957-5963-41c0-b05f-83718b1f3e40"
+type = "Tracing"
+prompt.program = """
+// Allowed-lateness state evolution.
+// Window size: 5 (units irrelevant). Allowed lateness: 3.
+// We maintain three sets: active, retained, evicted (just counts).
+// Events are (sensor_ts, kind) where kind is 'D' for data event and
+// 'W' for a watermark advance. Print the (active count, retained count,
+// emit type) after each step.
+
+use std::collections::BTreeMap;
+
+#[derive(Debug)]
+enum Step { Data(u64), Watermark(u64) }
+
+fn window_end(ts: u64, size: u64) -> u64 { ((ts / size) + 1) * size }
+
+fn main() {
+    let window_size: u64 = 5;
+    let allowed_lateness: u64 = 3;
+    let mut active: BTreeMap<u64, u32> = BTreeMap::new();   // window_end -> count
+    let mut retained: BTreeMap<u64, u32> = BTreeMap::new();
+    let mut last_emit_label = String::from("none");
+    let steps = [
+        Step::Data(2),       // window_end = 5
+        Step::Data(4),       // window_end = 5
+        Step::Watermark(6),  // closes window 5: active->retained, emit
+        Step::Data(3),       // late event into retained window 5: re-emit
+        Step::Watermark(9),  // evicts retained windows with end + 3 <= 9, i.e. end <= 6
+    ];
+    for (i, step) in steps.iter().enumerate() {
+        let mut emit = String::from("none");
+        match *step {
+            Step::Data(ts) => {
+                let we = window_end(ts, window_size);
+                if active.contains_key(&we) {
+                    *active.get_mut(&we).unwrap() += 1;
+                } else if retained.contains_key(&we) {
+                    *retained.get_mut(&we).unwrap() += 1;
+                    emit = format!("re-emit win {} count {}", we, retained[&we]);
+                } else {
+                    active.insert(we, 1);
+                }
+            }
+            Step::Watermark(wm) => {
+                // Move active windows with end <= wm to retained, emit initial.
+                let still_active = active.split_off(&(wm + 1));
+                let to_close: BTreeMap<u64, u32> = std::mem::replace(&mut active, still_active);
+                let mut closed_emits: Vec<String> = Vec::new();
+                for (we, cnt) in to_close.into_iter() {
+                    closed_emits.push(format!("emit win {} count {}", we, cnt));
+                    retained.insert(we, cnt);
+                }
+                // Evict retained windows with end + allowed_lateness <= wm.
+                let evict_cutoff = wm.saturating_sub(allowed_lateness);
+                let still_retained = retained.split_off(&(evict_cutoff + 1));
+                let _evicted = std::mem::replace(&mut retained, still_retained);
+                if !closed_emits.is_empty() {
+                    emit = closed_emits.join(", ");
+                } else {
+                    emit = "watermark advanced".to_string();
+                }
+            }
+        }
+        last_emit_label = emit;
+        println!(
+            "step={} active={} retained={} -> {}",
+            i + 1, active.len(), retained.len(), last_emit_label
+        );
+    }
+}
+"""
+answer.doesCompile = true
+answer.stdout = """step=1 active=1 retained=0 -> none
+step=2 active=1 retained=0 -> none
+step=3 active=0 retained=1 -> emit win 5 count 2
+step=4 active=0 retained=1 -> re-emit win 5 count 3
+step=5 active=0 retained=0 -> watermark advanced"""
+context = """
+Step 1: data ts=2 → window_end=5; new active window with count 1.
+Step 2: data ts=4 → window_end=5; window 5 already active; count 2.
+Step 3: watermark advance to 6. Window with end=5 ≤ 6: move to retained,
+emit count 2. Evict cutoff = 6-3 = 3; nothing in retained ≤ 3, no
+eviction. Active: 0; Retained: 1 (window 5).
+Step 4: data ts=3 → window_end=5; window 5 is retained, accept and
+re-emit count 3.
+Step 5: watermark advance to 9. Active is empty. Evict cutoff = 9-3 = 6;
+window 5 has end=5 ≤ 6, evicted. Active: 0; Retained: 0.
+The trace shows both halves of the two-tier behavior: active→retained
+transition at watermark=6 with the initial emit, late event accepted
+into the retained window with re-emit, and final eviction at watermark=9
+when the lateness budget expires. After step 5, any further late event
+for window 5 would be silently dropped — the operator no longer holds
+its state.
+"""
+
+[[questions]]
+id = "f8bad06a-57fe-46a5-97ef-8c3f1d9e2b8d"
+type = "MultipleChoice"
+prompt.prompt = """
+The retracting operator from the lesson emits Retract followed by
+Insert when correcting a window. A teammate proposes reversing the
+order — Insert first, then Retract — to make the new value visible
+sooner. Why is this wrong?
+"""
+answer.answer = "The downstream sink processes records in FIFO order. With Insert-then-Retract, the sink first stores the new (corrected) result, then deletes it on receiving the Retract — leaving the sink with no stored result for that window. Retract-then-Insert is the only ordering that produces the right final state: the retract removes the previously-stored result, then the insert installs the corrected one. The naïve 'newer first' intuition is exactly wrong here because the channel and sink semantics are FIFO-and-applied-in-order, not 'apply the latest.'"
+prompt.distractors = [
+    "Insert-then-Retract violates the watermark protocol's monotonicity guarantee: the corrected insert's sequence is higher than the retract's, so processing the insert first appears as a sequence regression to the downstream",
+    "Insert-then-Retract is fine in principle but breaks under at-least-once delivery: a duplicated insert (delivered twice) followed by a single retract leaves the downstream with one extra copy of the corrected result that the retract cannot reach",
+    "Insert-then-Retract requires the downstream to maintain a 'pending operations' queue and apply them in reverse order, which doubles the storage cost compared to retract-then-insert",
+]
+context = """
+The FIFO-ordering argument is the right one. The channel and sink
+process records in the order they arrive. Insert-then-Retract installs
+the new result then deletes it; the final state is empty. Retract-
+then-Insert removes the previous result then installs the new one;
+the final state is correct. The 'newer first' intuition fails because
+the records are applied sequentially, not merged by some smart
+operator. The other distractors invent constraints (sequence
+monotonicity is not violated by either ordering; at-least-once
+behavior is the same for both orderings; pending-queue is not part
+of the lesson's design) that mask the simpler structural answer.
+"""
+
+[[questions]]
+id = "088cd956-3cbf-4141-9c58-91306698e6c6"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson's retraction-aware sink uses an UPSERT with `WHERE
+excluded.sequence > window_results.sequence`. Operations reports a
+case where two operator instances are running (during a rolling
+deploy) and both are emitting for window 17: instance A emits
+sequence 3, instance B emits sequence 4. The sink correctly stores
+sequence 4. A few seconds later, instance A's delayed retransmit
+(it tried to emit sequence 3 again, with retry) arrives at the sink.
+What does the sink do, and why is the WHERE clause structured this way?
+"""
+answer.answer = "The sink does nothing. The retransmitted sequence-3 insert tries to UPSERT, but the WHERE clause `excluded.sequence > window_results.sequence` evaluates to `3 > 4` which is false; the UPDATE is skipped, and the existing sequence-4 row is preserved. The strict-greater comparison is precisely what makes the sink robust to delayed retransmits and out-of-order arrival from concurrent operator instances: only strictly-newer sequences win, regardless of arrival order."
+prompt.distractors = [
+    "The sink overwrites the sequence-4 row with sequence 3, since UPSERT operations are unconditional in SQLite. The WHERE clause is evaluated by the application layer before the UPSERT, but here the application layer is bypassed because the retransmit comes through a different code path",
+    "The sink panics with a constraint-violation error because two writers attempting to write to the same window_id is detected as a conflict that the schema does not permit. The fix is to switch to MERGE (Postgres) instead of UPSERT (SQLite), which handles this case",
+    "The sink stores both sequence 3 and sequence 4 as separate rows because the primary key is `(window_id, sequence)`, not just `window_id`. The downstream reader must select the row with the highest sequence at query time",
+]
+context = """
+The strict-greater WHERE is the operationally correct treatment of
+the lesson's at-least-once-plus-idempotent composition. Delayed
+retransmits with stale sequences arrive after newer sequences have
+landed; the strict comparison rejects them silently. Concurrent
+emitters from different operator instances (rare in steady state,
+common during deploys) produce out-of-order arrivals where the same
+mechanism applies. The other distractors invent SQL semantics that
+do not exist (UPSERT is conditional in SQLite when WHERE clauses
+are present), schema designs that the lesson did not propose, and
+constraint-violation behaviors that the operator's stated PK
+(window_id alone) does not produce.
+"""
