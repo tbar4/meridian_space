@@ -1,0 +1,192 @@
+[[questions]]
+id = "2d4b6d3a-bacc-4b83-abc7-1943658c64ca"
+type = "MultipleChoice"
+prompt.prompt = """
+A junior engineer adds a new operator to the SDA pipeline that uses
+`tokio::sync::mpsc::unbounded_channel()` for its outgoing edge,
+arguing 'this avoids the complexity of buffer sizing and we have plenty
+of memory.' Code review flags this. What is the strongest objection
+the lesson makes?
+"""
+answer.answer = "An unbounded channel is a place where backpressure does not propagate. The upstream operator never observes the downstream's slowness because every send completes immediately; the downstream falls behind and the buffer grows in proportion to the gap × duration. Under any sustained slowdown the channel grows until something out-of-band intervenes (OOM killer, container memory cap, runtime memory budget) — none of which produce graceful behavior. The bounded-channel-everywhere invariant exists structurally, not as a 'best practice' to skip when convenient."
+prompt.distractors = [
+    "Unbounded channels have higher per-send overhead than bounded channels because the underlying queue allocates on every push; bounded channels reuse pre-allocated slots and are 2-3x faster in microbenchmarks",
+    "Unbounded channels do not implement Send, so the operator that uses one cannot be spawned onto a multi-threaded tokio runtime — the orchestrator's spawn would fail at runtime",
+    "Unbounded channels use a different internal lock-free algorithm that is incompatible with tokio's cooperative scheduling — they can starve other tasks on the same worker thread",
+]
+context = """
+The structural-correctness argument is the right one. Bounded channels
+make the pipeline's pressure-traversal invariant load-bearing on the
+channel mechanics; unbounded channels break it silently. The other
+distractors invent properties that do not exist. unbounded_channel does
+implement Send and works fine in multi-threaded runtimes; the per-send
+overhead is not 2-3x; tokio's scheduler is not affected by which
+channel type is used. The objection is about correctness, not
+performance — and the consequence shows up under load, not in
+benchmarks. The pattern the lesson keeps emphasizing: silent drops or
+silent buffer growth are the bug; the bound is the property that lets
+ops see the symptom early.
+"""
+
+[[questions]]
+id = "8df52988-092e-40ca-ba67-5991587bd6d4"
+type = "MultipleChoice"
+prompt.prompt = """
+The conjunction-emitter has a 200ms SLO from observation-arrival to
+alert-emit. The downstream alert subscriber is occasionally slow during
+deploys (briefly returns 503 for a few seconds). Which FlowPolicy from
+the lesson is the right choice for the emitter→subscriber edge, and
+why?
+"""
+answer.answer = "FlowPolicy::Timed(200ms). The SLO bounds the maximum acceptable wait at this edge; blocking past 200ms is worse than dropping the alert (a delayed alert is operationally indistinguishable from missing it). The Timed variant lets the operator make an explicit choice — drop, route to slow-path archive, or DLQ — rather than blocking past the SLO. send().await would block indefinitely on a slow downstream; try_send would not even attempt to wait through normal-rate variability."
+prompt.distractors = [
+    "FlowPolicy::Backpressure (send().await) — the SLO is downstream of this edge, so the emitter should apply backpressure on the correlator and let the SLO fail naturally if necessary",
+    "FlowPolicy::Shed (try_send) — alerts are too important to risk dropping during transient slowdowns; the immediate-fail-on-full semantics protect the alert subscriber from getting overloaded during deploys",
+    "FlowPolicy::Backpressure with a smaller buffer (32 items) — sized so the channel cannot hold more than 200ms of normal-rate traffic, making blocking past the SLO physically impossible",
+]
+context = """
+The SLO-bound case is exactly what FlowPolicy::Timed is designed for.
+The deadline is the SLO budget; the action on timeout is the explicit
+operational decision (drop with metric, DLQ, archive). The
+send().await answer mishandles the SLO — the SLO IS at this edge, not
+'downstream.' The try_send answer inverts the meaning of the SLO
+(immediate fail-on-full produces drops on every minor capacity
+fluctuation, not just on 503-class slowdowns). The 'smaller buffer'
+answer is a clever-sounding workaround but does not solve the right
+problem: the channel can be empty and the next send still take
+arbitrarily long if the downstream is slow; the buffer size does not
+bound wait time, only the size of the slack. send_timeout binds wait
+time directly.
+"""
+
+[[questions]]
+id = "71d35888-e7b9-4838-8f22-69d22e101aa2"
+type = "Tracing"
+prompt.program = """
+// Simulate a bounded-channel pipeline under burst load.
+// Producer rate: 100 items/tick. Consumer rate: 30 items/tick.
+// Channel capacity: 200. We tick 8 times. Each tick: producer tries
+// to add 100, consumer drains up to 30. Any items the producer cannot
+// add (channel full) are dropped, and the drop counter increments.
+//
+// The trace shows the rate gap between producer and consumer being
+// absorbed by the channel until the channel fills, after which drops
+// begin and persist.
+
+fn main() {
+    let capacity: u32 = 200;
+    let producer_rate: u32 = 100;
+    let consumer_rate: u32 = 30;
+    let mut occupancy: u32 = 0;
+    let mut drops: u32 = 0;
+    let ticks: u32 = 8;
+
+    for tick in 1..=ticks {
+        // Consumer drains first.
+        let drained = std::cmp::min(consumer_rate, occupancy);
+        occupancy -= drained;
+        // Producer attempts to enqueue.
+        let space = capacity - occupancy;
+        let added = std::cmp::min(producer_rate, space);
+        let dropped_this_tick = producer_rate - added;
+        occupancy += added;
+        drops += dropped_this_tick;
+        println!(
+            "tick={} drained={} added={} dropped_this_tick={} occupancy={} total_drops={}",
+            tick, drained, added, dropped_this_tick, occupancy, drops
+        );
+    }
+}
+"""
+answer.doesCompile = true
+answer.stdout = """tick=1 drained=0 added=100 dropped_this_tick=0 occupancy=100 total_drops=0
+tick=2 drained=30 added=100 dropped_this_tick=0 occupancy=170 total_drops=0
+tick=3 drained=30 added=60 dropped_this_tick=40 occupancy=200 total_drops=40
+tick=4 drained=30 added=30 dropped_this_tick=70 occupancy=200 total_drops=110
+tick=5 drained=30 added=30 dropped_this_tick=70 occupancy=200 total_drops=180
+tick=6 drained=30 added=30 dropped_this_tick=70 occupancy=200 total_drops=250
+tick=7 drained=30 added=30 dropped_this_tick=70 occupancy=200 total_drops=320
+tick=8 drained=30 added=30 dropped_this_tick=70 occupancy=200 total_drops=390"""
+context = """
+Trace step-by-step. tick=1: consumer drains 0 (channel was empty),
+producer adds 100; occupancy=100. tick=2: consumer drains 30,
+occupancy=70; producer adds 100; occupancy=170. tick=3: consumer
+drains 30, occupancy=140; producer wants 100 but space=60; adds 60,
+drops 40; occupancy=200. From tick 4 onward, the channel is full
+every cycle: consumer drains 30, producer can only add the 30 that
+just freed up, the remaining 70 drop. Total drops grows by 70 per
+tick. The trace is the canonical 'rate gap absorbed until full, then
+drops persist' pattern that the lesson describes. The takeaway: the
+channel buffer absorbs short bursts but provides no help for
+sustained rate gaps. The right operator response under sustained
+load — applying backpressure to the producer (so it slows rather
+than drops), or load-shedding with priority (so the dropped items
+are the lowest-value ones) — is what the FlowPolicy and shedding
+machinery are for, and what the rest of this module develops.
+"""
+
+[[questions]]
+id = "0a939df4-0047-4d1a-871f-7896c57d3ebd"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson's BurstProfile struct computes recommended buffer size as
+`(peak_rate - processing_rate) × peak_duration × safety_factor`.
+Operations measures the radar source: peak observation rate during
+fragmentation events is 10,000/sec, the normalizer's measured
+throughput is 8,000/sec, the burst typically lasts 30 seconds. The
+team uses a safety factor of 2.0. What is the recommended buffer
+size, and what does it cost in memory at ~200 bytes per envelope?
+"""
+answer.answer = "120,000 items, ~24 MB. Math: (10000 - 8000) × 30 × 2.0 = 120,000 slots. At 200 bytes per Observation envelope, that's ~24 MB of memory committed to channel buffering. The lesson's discipline asks the team to confirm the cost is acceptable: 24 MB is a small fraction of typical pipeline memory budgets, so for SDA this number is fine; for a memory-constrained deployment it would be revisited."
+prompt.distractors = [
+    "20,000 items, ~4 MB. Math: peak_rate × peak_duration × safety_factor = 10000 × 30 × 2.0 / 30 (the 30 is the duration's normalization)",
+    "60,000 items, ~12 MB. The safety factor is multiplicative against the duration but not the rate gap, so the formula is `(peak_rate - processing_rate) × peak_duration × safety_factor / 2`",
+    "300,000 items, ~60 MB. The right formula multiplies the entire peak rate by the duration (not the rate gap), giving total burst items, with safety factor on top",
+]
+context = """
+The math the lesson states is unambiguous: rate gap × duration × safety
+factor. The rate gap is what the channel must absorb (the producer
+runs faster than the consumer); the duration is how long the gap
+persists; the safety factor is headroom for variance. Multiplying the
+full peak rate (not the gap) double-counts what the consumer is
+already processing during the burst. Dividing by 2 in the second
+distractor is invented. The 30-as-normalization in the first
+distractor is invented. The right answer pulls the lesson's framing
+into the concrete numbers: 24 MB is the cost of absorbing the burst
+without dropping; if memory is more constrained, the team revisits
+either the burst-absorption requirement or the safety factor.
+"""
+
+[[questions]]
+id = "a6e45924-af51-442b-99cb-2eb716e213ff"
+type = "MultipleChoice"
+prompt.prompt = """
+The metrics-export operator publishes per-event sampling metrics to a
+Prometheus pushgateway. It currently uses send().await on its outgoing
+channel; under burst load, the operator backs up because the pushgateway
+is slow. The result: the pipeline's hot operators are also slowed
+because the metrics operator was sharing a worker thread with them,
+and its blocking on send becomes a scheduling burden. What is the
+correct fix per the lesson?
+"""
+answer.answer = "Switch the metrics edge to FlowPolicy::Shed (try_send + drop counter). Metrics are sheddable data — a sample that did not get exported is a small recoverable loss, and blocking the upstream pipeline operators on the metrics path is a much larger cost than the marginal benefit of every metric reaching the pushgateway. The drop counter (`flow_drops_total{policy=\"shed\"}`) makes the shedding observable for ops; the operator's structural problem (blocking on a non-critical edge) is resolved."
+prompt.distractors = [
+    "Move the metrics-export operator to spawn_blocking, so its slowness no longer affects async worker thread availability for the hot operators",
+    "Increase the metrics channel buffer to a much larger size (say 1 million items) so the export operator has enough slack to handle bursts without blocking",
+    "Add a CircuitBreaker (Module 2 L4) around the pushgateway calls so the export operator fails fast when the pushgateway is degraded",
+]
+context = """
+The shed answer is the right shape: the data is sheddable, the cost
+of blocking the hot path is real, and the FlowPolicy enum has the
+exact primitive for this case. The spawn_blocking distractor moves
+the problem rather than solving it (the metrics operator still backs
+up; it just does so on a different pool). The larger-buffer distractor
+delays the problem (the buffer eventually fills, and the cost is
+worse because the export operator has been running on stale metrics
+for a long time). The CircuitBreaker distractor addresses a different
+problem (downstream protection during sustained outages) — which is
+useful in addition to the shed policy but does not replace it. The
+lesson's structural framing is: choose the FlowPolicy that matches
+what should happen on full, instrument the chosen policy with metrics,
+let ops see the rate.
+"""

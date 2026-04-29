@@ -88,3 +88,8 @@
   - [Watermarks](./data_pipelines_track/module-03-event-time-and-watermarks/lesson-03-watermarks.md)
   - [Late Data](./data_pipelines_track/module-03-event-time-and-watermarks/lesson-04-late-data.md)
   - [Project: Conjunction Window Engine](./data_pipelines_track/module-03-event-time-and-watermarks/project-conjunction-window-engine.md)
+- [Module 4: Backpressure and Flow Control](./data_pipelines_track/module-04-backpressure-and-flow-control/README.md)
+  - [Bounded Channels](./data_pipelines_track/module-04-backpressure-and-flow-control/lesson-01-bounded-channels.md)
+  - [Credit-Based Flow Control](./data_pipelines_track/module-04-backpressure-and-flow-control/lesson-02-credit-based-flow.md)
+  - [End-to-End Backpressure Propagation](./data_pipelines_track/module-04-backpressure-and-flow-control/lesson-03-end-to-end-propagation.md)
+  - [Project: Backpressure-Aware Fusion Broker](./data_pipelines_track/module-04-backpressure-and-flow-control/project-backpressure-broker.md)

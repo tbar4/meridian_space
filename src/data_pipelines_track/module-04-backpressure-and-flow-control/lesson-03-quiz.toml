@@ -1,0 +1,222 @@
+[[questions]]
+id = "78bb2af1-7647-41a2-9611-818a7036f498"
+type = "MultipleChoice"
+prompt.prompt = """
+Read the following 'small refactor' inside an operator's hot loop:
+
+```rust,ignore
+while let Some(obs) = input.recv().await {
+    let output = output.clone();
+    tokio::spawn(async move {
+        let processed = process(obs);
+        let _ = output.send(processed).await;
+    });
+}
+```
+
+A teammate proposes this as 'a small concurrency win' over the
+inline-await version. Why is it the canonical pressure-chain breaker?
+"""
+answer.answer = "tokio::spawn returns immediately. The hot loop iterates as fast as `input.recv().await` produces, with no waiting on the downstream send. The output channel never applies backpressure to the input channel because the spawned tasks complete asynchronously and out-of-order. Under any sustained downstream slowdown, spawned tasks accumulate without bound — each holds a clone of the output sender, the in-flight observation, and a tokio task allocation. Memory grows linearly with the slowdown duration. The fix is to remove the spawn and inline the await, restoring the backpressure chain."
+prompt.distractors = [
+    "It is fine in principle but breaks `tracing` correlation: spans created in the spawned task have a different trace ID than the parent loop, so debugging is harder. The fix is to add `tracing::Span::current().clone()` and pass it into the spawn",
+    "It is correct but suboptimal: tokio's work-stealing scheduler does not migrate spawned tasks across worker threads quickly enough, so concurrent processing only pays back in long-tail scenarios. Use `rayon::spawn` for compute-bound work instead",
+    "It is broken because output.clone() leaks file descriptors — every clone of an mpsc::Sender allocates a new FD; under sustained load the process exhausts its FD limit. The fix is to share a single Arc<Sender> across spawns",
+]
+context = """
+The pressure-chain breakage is the right answer and the lesson's
+canonical anti-pattern. The other distractors invent unrelated issues:
+tracing correlation is real but not the dominant problem; tokio's
+scheduler does work-steal effectively; mpsc::Sender::clone is reference
+counting, not FD allocation. The lesson's diagnostic shape: when an
+operator under sustained load shows growing memory but no growing
+channel occupancy, look for a spawn-per-event in the loop body. The
+operator's channel can't fill if the work is leaving via a side path.
+"""
+
+[[questions]]
+id = "979e9904-ffcb-4da0-bf5b-df5db948ef38"
+type = "MultipleChoice"
+prompt.prompt = """
+Operations is on a P1 incident: the SDA pipeline's alert emit rate
+has dropped to 30% of nominal. The diagnostic dashboard shows
+per-channel occupancy across six edges in the topology. Three of the
+edges show persistently 100% occupancy; the rest show 5-30%.
+Which operator is the bottleneck per the lesson's gradient-reading
+discipline?
+"""
+answer.answer = "The operator immediately downstream of the rightmost (most-downstream) of the three persistently-full edges. That operator is the bottleneck — its incoming channel is full because it can't drain fast enough; its outgoing channel may also be full because IT is the slow stage being awaited by everything before it. The persistent saturation pattern (full upstream of the bottleneck, partially-full or empty downstream of it) is what the pressure-chain physics produces; identifying it on the dashboard is the first-look diagnostic."
+prompt.distractors = [
+    "The operator immediately upstream of the leftmost (most-upstream) of the three persistently-full edges. That operator is producing too fast for downstream to keep up; reducing its rate (rate-limiting at the source) is the right intervention",
+    "The operator at the position of any of the three persistently-full edges; they are equivalent by the symmetry of the pressure-chain. Pick whichever is easiest to investigate first",
+    "The bottleneck cannot be identified from occupancy alone; the dashboard must be cross-referenced with per-operator latency histograms to find the operator with elevated per-event processing time",
+]
+context = """
+The gradient-reading discipline points at the rightmost full edge.
+Pressure traverses from sink toward source: the bottleneck operator's
+input is full first (and stays that way), and the upstream channels
+fill in sequence as they back up. Looking for the point where
+'full' transitions to 'not full' on the way downstream identifies
+the bottleneck. The leftmost-full reading is exactly inverted (the
+left edges are full because they back up from the actual slow
+operator). The 'they're equivalent' answer ignores the structural
+ordering. The 'cross-reference with latency' answer adds a step that
+is sometimes useful but is not necessary for the first-look call —
+the channel-occupancy gradient alone is diagnostic.
+"""
+
+[[questions]]
+id = "388c8855-5636-4748-b6aa-3e82d5870f1a"
+type = "Tracing"
+prompt.program = """
+// Simulate a 5-stage pipeline's per-channel occupancy under sustained
+// load. Capacities are all 100. Producer emits at the input rate;
+// each stage consumes from its input channel and emits to its output
+// channel at a per-stage rate (per tick). The slowest stage produces
+// the bottleneck.
+//
+// Print the post-tick occupancy for each channel. The persistent-full
+// pattern reveals the slowest stage.
+
+fn main() {
+    let cap: u32 = 100;
+    let producer: u32 = 80;
+    // Per-stage processing rates. Stage 3 is slowest (40/tick).
+    let rates = [80u32, 70u32, 40u32, 70u32, 80u32];
+    // Channel between stage i and stage i+1; we have rates.len() channels:
+    //   ch[0] = producer→stage1, ..., ch[4] = stage4→stage5.
+    let mut chs = [0u32; 5];
+    let ticks: u32 = 6;
+
+    for tick in 1..=ticks {
+        // Each stage drains from its input channel up to its rate and
+        // pushes to its output channel up to that channel's free space.
+        // The producer pushes into ch[0]. Stage 5 drains ch[4] and emits.
+        // Process from downstream to upstream so each stage sees the
+        // post-drain state of its output channel before pushing.
+
+        // Stage 5 (final): drain ch[4] up to rate[4]. (No output channel.)
+        let drained_5 = std::cmp::min(rates[4], chs[4]);
+        chs[4] -= drained_5;
+
+        // Stages 4..1: drain ch[i-1], push to ch[i] up to space.
+        for i in (1..=4u32).rev() {
+            let i = i as usize;
+            let drain = std::cmp::min(rates[i-1], chs[i-1]);
+            // Available space in ch[i].
+            let space = cap - chs[i];
+            let pushed = std::cmp::min(drain, space);
+            chs[i-1] -= drain;          // remove drained items
+            // Items that drained but couldn't push are dropped here for
+            // simplicity (production code would block; we flatten the
+            // simulation to make occupancy patterns clearest).
+            chs[i] += pushed;
+            // Lost items: drain - pushed (intentionally not tracked).
+            let _ = drain - pushed;
+        }
+
+        // Producer pushes into ch[0] up to space.
+        let space0 = cap - chs[0];
+        let push0 = std::cmp::min(producer, space0);
+        chs[0] += push0;
+
+        println!(
+            "tick={} ch0={} ch1={} ch2={} ch3={}",
+            tick, chs[0], chs[1], chs[2], chs[3]
+        );
+    }
+}
+"""
+answer.doesCompile = true
+answer.stdout = """tick=1 ch0=80 ch1=0 ch2=0 ch3=0
+tick=2 ch0=80 ch1=80 ch2=0 ch3=0
+tick=3 ch0=80 ch1=90 ch2=70 ch3=0
+tick=4 ch0=80 ch1=100 ch2=100 ch3=40
+tick=5 ch0=80 ch1=100 ch2=100 ch3=40
+tick=6 ch0=80 ch1=100 ch2=100 ch3=40"""
+context = """
+The simulation flattens send-blocking to drop-on-no-space so the
+occupancy pattern is unambiguous in pure synchronous code. Stage 3 is
+the slowest at 40/tick; producer and the other stages run at 70-80/tick.
+The trace shows the gradient-reading discipline in action.
+
+By tick 4, the system has reached steady state: ch0 holds 80 (the
+producer rate, refilled every tick), ch1 and ch2 saturate at 100
+(persistently full), ch3 stabilizes at 40 (the rate stage 3 produces
+into it; stage 4 drains it down to 0 each tick but it refills). Ch4
+not shown but stable at 0 (stage 5 drains as fast as stage 4 fills).
+
+Reading the gradient dashboard at tick 6: ch1 and ch2 are persistently
+100; ch3 is at 40 and not growing; ch0 is at 80 (the producer rate).
+The rightmost-full edge is ch2 — the channel feeding stage 3 — so
+stage 3 is the bottleneck. The lesson's diagnostic shape is exactly
+this: find the rightmost full channel and the operator immediately
+downstream is the slow stage. The decreasing-occupancy pattern past
+the bottleneck (ch3 well below cap, ch4 empty) is the second half
+of the diagnostic signature.
+"""
+
+[[questions]]
+id = "333e3017-3c9f-4712-b7ce-16afbbeff13c"
+type = "MultipleChoice"
+prompt.prompt = """
+The SDA pipeline has two halves separated by a Kafka topic: the
+ingestion half writes observations to the topic; a separate consumer
+half reads from the topic and runs the windowed correlator. Operations
+notices that the consumer half has fallen behind (consumer lag is
+growing at 100 events/sec). The producer half shows no symptoms — its
+local channel occupancy is all green, its producer-side metrics show
+normal output rates. Why does the slow consumer not propagate
+backpressure to the producer, and what is the lesson's recommendation?
+"""
+answer.answer = "Kafka decouples producer and consumer intentionally. The producer's send completes when the broker acknowledges; the broker accepts as long as it has retention space. Consumer lag is not visible to the producer because the producer is not waiting on the consumer at all — the broker's persistent log is between them. The lesson's recommendation is to monitor consumer lag explicitly (a Prometheus gauge for `consumer_lag_seconds` per topic per consumer group) and alert when it exceeds a threshold. The within-process pressure-chain that 'just works' inside one process becomes an explicit observability discipline at the Kafka boundary."
+prompt.distractors = [
+    "The producer's `acks=0` setting means it does not wait for broker acknowledgments; switching to `acks=all` would make broker-level slowdowns propagate as producer-side latency, which would back-pressure the producer's upstream channel",
+    "The Kafka topic is configured with auto-create-on-write and unbounded retention; the consumer's lag does not affect the producer because there is always room in the topic. Reducing retention to 1 hour would force backpressure when the consumer falls behind",
+    "Kafka's consumer-group rebalance protocol normally propagates lag back to the producer via metadata updates; the consumer's slow rebalance is breaking the propagation. Restarting the consumer group fixes it",
+]
+context = """
+The Kafka decoupling is the lesson's specific answer. Producer-consumer
+backpressure across Kafka is not 'a feature that's broken'; it is
+'not a feature' by design. Kafka's value proposition rests on the
+decoupling — producers and consumers can scale independently, restart
+independently, replay independently. The pipeline operator's job is
+to monitor lag as a substitute for the missing pressure signal. The
+distractors invent mechanisms that do not exist: acks=0 vs acks=all
+controls durability/latency, not consumer-side propagation. Retention
+limits affect consumer recovery, not back-propagation. Rebalance
+protocol does not propagate lag. The right answer is the lesson's
+operational discipline: explicit monitoring at the boundary.
+"""
+
+[[questions]]
+id = "340d1747-2ad1-45d7-89e2-e89a7855cb7a"
+type = "MultipleChoice"
+prompt.prompt = """
+A teammate writes a structured-logging operator that emits one log
+event per observation, sending the event over a separate
+mpsc::unbounded_channel to a logging task. Their reasoning: 'logging
+must never block the data path; the unbounded channel guarantees that.'
+What is the lesson's correction?
+"""
+answer.answer = "The unbounded channel does prevent the logging path from blocking the data path under steady-state load, but it breaks pressure propagation. Under sustained pipeline slowdown, the logging channel grows in proportion to the slowdown duration; memory grows; the logging task falls further and further behind the data being logged; eventually the process OOMs or the logs are so stale they're useless. The right pattern is `try_send` + a `dropped_log_events_total` counter (Lesson 1's load-shedding shape): logging is sheddable, drops are observable via the counter, the data path never blocks AND memory stays bounded."
+prompt.distractors = [
+    "The operator should use the standard `tracing` crate's blocking machinery, which is pre-instrumented and has no per-event channel cost; the custom logging channel is reinventing infrastructure that already exists",
+    "The unbounded channel is fine; the real bug is that the logging task is single-threaded. Spawning N logging tasks behind a fan-in channel parallelizes the export and prevents lag from accumulating",
+    "The operator should embed log events in the data envelope (as a side-band field) so they ride the same pressure chain as the observations themselves; the separate channel is the wrong shape",
+]
+context = """
+The try_send + counter pattern from Lesson 1 is the right answer.
+'Logging must never block' is correct as a goal; 'unbounded channel'
+is the wrong way to achieve it because it trades the blocking problem
+for the unbounded-growth problem. Load-shedding the logging path
+under sustained pressure is the right behavior — the counter makes
+the shed observable, the data path never blocks, memory stays
+bounded. The tracing-blocking-machinery distractor is partially right
+(tracing IS faster than custom channels for many use cases) but
+misses the point: the bug is the unbounded channel, not the choice
+of logging library. The N logging tasks distractor moves the problem
+without fixing it. The 'embed in envelope' distractor pollutes the
+data envelope with operational concerns and breaks the M1 envelope
+discipline.
+"""
