@@ -1,0 +1,93 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The column started dictionary-encoded but fell back to plain partway through the row group because the dictionary exceeded its size cap. The column's effective cardinality is higher than the writer's defaults assume."
+prompt.distractors = [
+  "The writer wrote two separate column chunks for the same column — one dictionary, one plain — to support different downstream consumers. This is normal Parquet behavior.",
+  "The reader is misreporting the encodings; a single column chunk uses exactly one encoding per data page, and a row group's column chunk lists only the most-used encoding.",
+  "The column was migrated mid-write: rows written before a schema change use dictionary encoding, rows after use plain. The writer recorded both for compatibility."
+]
+prompt.prompt = """
+You inspect a Parquet file's footer and find that a single column chunk lists *both* `RLE_DICTIONARY` and `PLAIN` in its encodings. What does this tell you about how the chunk was written?
+"""
+context = "Parquet's writer enforces a dictionary size cap (default 1 MB). If the cap is hit partway through a row group, the writer falls back to plain encoding for the remainder of the chunk. The footer records every encoding the chunk actually used, so a chunk that lists both a dictionary encoding and `PLAIN` is a chunk that fell back. Persistent fallbacks are the signal that the column's cardinality has grown beyond what dictionary handles efficiently; the right responses are raising the dictionary cap, switching encodings, or investigating an upstream data-shape change."
+id = "44794496-5edf-4c6b-b658-943c20c3acda"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "DELTA_BINARY_PACKED — the inter-sample deltas are small and uniform, so deltas compress to ~1 byte/value before the codec runs."
+prompt.distractors = [
+  "RLE_DICTIONARY — the values come from a known sensor cadence, so they will repeat across rows.",
+  "BYTE_STREAM_SPLIT — the high-order bytes of the timestamps will cluster after splitting.",
+  "PLAIN — timestamps are 8 bytes each and have no exploitable structure; let the codec handle them."
+]
+prompt.prompt = """
+You are choosing an encoding for `sample_timestamp_ns`, an `Int64` column holding nanosecond timestamps from a 100 Hz sensor. The values are strictly increasing with essentially constant 10,000,000 ns (10 ms) gaps. Which encoding gives the best compression?
+"""
+context = "Sample timestamps from a constant-cadence sensor are strictly increasing with an essentially constant inter-sample delta. Dictionary encoding fails because every value is distinct — the dictionary would be the full column. Plain leaves 8 bytes per value. Byte-stream-split helps with float bit-level clustering, not monotonic integers. DELTA_BINARY_PACKED is the encoding designed for this case: stores a base value and the deltas, which for a constant-cadence stream are essentially a constant. After the codec, the column is often under 0.5 bytes per value."
+id = "f13a6a00-f7d4-4d0f-a3d6-fa0d8290c64f"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Floats from the same physical measurement cluster in their high-order bytes; splitting the 8-byte values into 8 parallel byte streams produces streams that compress well under the general-purpose codec that runs after."
+prompt.distractors = [
+  "Splitting the float values lets the codec apply different compression levels to each byte position, optimizing for the entropy of each.",
+  "Float values are stored in big-endian after the split, which matches the codec's preferred input order on most CPUs.",
+  "The split exposes the exponent and mantissa bits in separate streams, allowing the codec to apply IEEE-754-aware predictive coding."
+]
+prompt.prompt = """
+`BYTE_STREAM_SPLIT` is the right encoding for physical-measurement Float64 columns like `panel_voltage`. What does the encoding do, and why does it improve compression?
+"""
+context = "Byte-stream-split is a structural rearrangement: the 8 bytes of every Float64 value are dealt out to 8 parallel streams (all the first bytes together, all the second bytes together, etc.). For physical measurements that span a narrow magnitude range, the high-order bytes of adjacent values are often equal — the resulting streams are highly compressible. The byte count is the same as plain encoding before compression; the win comes entirely from the structure that emerges in the streams that the general-purpose codec then sees. The codec is unmodified and is not float-aware."
+id = "c11ee1fa-54a5-41e4-8dd3-3de5d19a0a00"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "raw_bytes=160 indexed_bytes=36 ratio=4"
+context = "Dictionary encoding's win comes from replacing repeated values with small integer indices into a separate dictionary. The example has 20 values drawn from 2 distinct values: raw is 20 × 8 = 160 bytes, the encoded form is 20 × 1 byte for the indices = 20 bytes plus 2 × 8 bytes for the dictionary = 16 bytes, total 36 bytes. The ratio (160 / 36 = 4 in integer division) shows the order-of-magnitude improvement before any general-purpose compression runs. In real Parquet the index stream is further bit-packed — 20 indices into 2 dictionary entries needs only 1 bit per index — driving the ratio higher still."
+prompt.program = """
+fn main() {
+    // 20 values from a column with only 2 distinct values.
+    let values: Vec<u64> = vec![100, 200, 100, 200, 100, 200, 100, 200,
+                                100, 200, 100, 200, 100, 200, 100, 200,
+                                100, 200, 100, 200];
+
+    // Plain encoding: 8 bytes per u64 value.
+    let raw_bytes = values.len() * std::mem::size_of::<u64>();
+
+    // Dictionary encoding: distinct values + 1 byte per index.
+    let mut dict: Vec<u64> = Vec::new();
+    let mut indices: Vec<u8> = Vec::new();
+    for &v in &values {
+        let idx = match dict.iter().position(|&d| d == v) {
+            Some(i) => i,
+            None => {
+                dict.push(v);
+                dict.len() - 1
+            }
+        };
+        indices.push(idx as u8);
+    }
+    let indexed_bytes = indices.len() + dict.len() * std::mem::size_of::<u64>();
+
+    print!(
+        "raw_bytes={} indexed_bytes={} ratio={}",
+        raw_bytes, indexed_bytes, raw_bytes / indexed_bytes,
+    );
+}
+"""
+id = "f9d7d111-5479-45cb-9b1d-c9a124277350"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Encoding then compression. The encoder extracts structure (repeats, sortedness, dynamic range) from the values; the compressor hits the residual entropy."
+prompt.distractors = [
+  "Compression then encoding. The compressor produces a smaller byte stream which the encoder can then index into more efficiently.",
+  "Encoding and compression in parallel, with the writer picking whichever produces the smaller output per page.",
+  "Either order; encoding and compression are commutative for the encodings Parquet uses."
+]
+prompt.prompt = """
+A Parquet writer applies two transforms to each column chunk: encoding (dictionary, delta, RLE, byte-stream-split) and compression (ZSTD, SNAPPY). In what order does the writer apply them, and why does the order matter?
+"""
+context = "The encoder's wins (dictionary, delta, RLE, byte-stream-split) come from exploiting structure in the raw values. Compressing first would destroy that structure — the compressed bytes have no monotonic-integer property, no repeated-value property, no float-byte-clustering property left to exploit. Parquet always encodes first, then compresses. The order matters; the operations do not commute."
+id = "4aa83d8b-0842-479d-ad43-9e99ffec6530"

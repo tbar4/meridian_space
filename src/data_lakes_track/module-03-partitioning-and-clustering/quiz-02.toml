@@ -1,0 +1,83 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Sorting by (a, b) clusters tightly on a but degrades to random order on b. Files have tight statistics on a (one file per a-bucket, narrow range) but loose statistics on b (each file spans the full b range), so queries filtering only on b cannot prune."
+prompt.distractors = [
+  "Sorting by (a, b) is identical in clustering effect to Z-order on (a, b). The two arrangements produce the same per-file statistics; the choice is purely operational.",
+  "Sorting by (a, b) clusters perfectly on both dimensions because the secondary sort on b produces tight b ranges within each a value. Z-order is needed only for three or more dimensions.",
+  "Sorting by (a, b) is preferred over Z-order when the data is small enough to fit in a single file. Z-order is the right choice for multi-file tables."
+]
+prompt.prompt = """
+A table is clustered on two columns (a, b). Why does sorting by (a, b) lexicographically produce worse pruning than Z-order on (a, b)?
+"""
+context = "Lexicographic sort clusters on the leading column and degrades to random order on subsequent columns. The structure is intuitive — values with the same a are adjacent, but their secondary sort on b only operates within already-narrow a buckets, which buys little when each a bucket is itself small. Z-order's bit-interleaving construction is what produces square-ish file boundaries: high bits of both a and b determine the file partition, so every file has tight ranges on both a and b. The improvement over lex sort is typically order-of-magnitude on queries against the second dimension."
+id = "c2ca050a-53f7-4f69-bfdb-a161ee68060a"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Z-order's recursive bit-interleaving structure produces a discontinuity at every level boundary — points adjacent in 1D Z-order can be far apart in 2D space along the 'jump' from one Z-shape to the next. Hilbert curves avoid this by tracing a continuous path; the practical effect is roughly 1.5-2× better clustering effectiveness."
+prompt.distractors = [
+  "Z-order is biased toward the leading dimension; Hilbert distributes the clustering effort equally across all dimensions. The improvement matters most for highly-asymmetric workloads.",
+  "Z-order requires integer-coordinate inputs; Hilbert handles floating-point coordinates natively. Most data has fractional values, so Hilbert is broadly preferable.",
+  "Z-order does not support more than two dimensions; Hilbert generalizes to N dimensions cleanly."
+]
+prompt.prompt = """
+The Hilbert curve produces better clustering than Z-order on the same data. What is the structural difference, and why doesn't every lakehouse use Hilbert?
+"""
+context = "Z-order's diagonal discontinuity is the well-known limitation. Walking the Z-shape from bottom-right of one quadrant to bottom-left of the next requires a 'jump' in 2D space; two points adjacent in the 1D Z-order can be far apart in 2D. The Hilbert curve traces a continuous path with no jumps, producing tighter clustering. The cost is computation — Hilbert keys are several times more expensive to compute, and the implementation is notoriously fiddly to get right. For most lakehouse workloads, the 1.5-2× improvement is not worth the complexity; Z-order's discontinuity loss is small relative to the per-file row count. Specialized geospatial deployments and scientific archives sometimes pay the Hilbert cost; production lakehouses typically use Z-order. The other distractors describe properties of Z-order that are wrong — Z-order generalizes to N dimensions, handles any same-scale integer input, and does not bias toward leading dimensions."
+id = "b843470b-7c38-41be-8541-ca838df46aec"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Clustering is a write-time discipline: data files are produced with rows already sorted by the cluster key. Readers see ordinary Parquet files with per-column statistics; the cluster key never appears in the schema and is not stored in the data. Pruning works through the same per-column-chunk statistics as unclustered tables — just with tighter ranges because the rows are sorted."
+prompt.distractors = [
+  "Clustering adds a hidden 'cluster_key' column to every data file. Readers consult this column to determine file boundaries and apply tighter pruning.",
+  "Clustering changes the Parquet file's footer to include an extra 'cluster index' structure. Readers must support this extension to benefit from the clustering.",
+  "Clustering requires a separate cluster-index manifest at the manifest list level. Readers walk this manifest before opening any data files."
+]
+prompt.prompt = """
+A table is migrated from no clustering to Z-order clustering on (payload_id, sensor_kind). Old readers continue to query the table without modification. What changes about the data files, and what does NOT change?
+"""
+context = "Clustering is intentionally a write-side discipline that produces no read-side changes. The Parquet files a clustered table produces are completely ordinary — same footer, same encodings, same statistics shape. The only difference is that the rows happen to be sorted by the cluster key, which produces tighter per-column-chunk statistics, which in turn makes pruning more effective. The cluster key itself is computed at write time, used to order the rows, and discarded. This is what makes clustering safe to add to an existing table without breaking readers: existing readers see the same file format and the same statistics interface; they just get better pruning as the compaction job rewrites files with the cluster order."
+id = "5b2b0de0-d795-4731-956d-763791e669e0"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "z(2,3)=14 z(3,2)=13"
+context = "Z-order interleaves bits starting from the LSB. For x=2, y=3 (binary x=10, y=11): interleaving y_bit, x_bit alternately starting at position 0 gives bit 0 = x[0] = 0, bit 1 = y[0] = 1, bit 2 = x[1] = 1, bit 3 = y[1] = 1 → 0b1110 = 14. For x=3, y=2 (binary x=11, y=10): bit 0 = x[0] = 1, bit 1 = y[0] = 0, bit 2 = x[1] = 1, bit 3 = y[1] = 1 → 0b1101 = 13. The convention here puts x at even bit positions and y at odd bit positions; the opposite convention swaps them. The key property — high bits determine coarse position, low bits refine — is preserved either way."
+prompt.program = """
+fn main() {
+    // Compute a 2D Z-order key by interleaving the bits of x and y.
+    // x's bits go to even positions (0, 2, 4, ...);
+    // y's bits go to odd positions (1, 3, 5, ...).
+    fn zorder(x: u32, y: u32) -> u64 {
+        let mut z: u64 = 0;
+        for bit in 0..16 {
+            z |= (((x >> bit) & 1) as u64) << (2 * bit);
+            z |= (((y >> bit) & 1) as u64) << (2 * bit + 1);
+        }
+        z
+    }
+
+    // Compute two example Z-order keys.
+    let a = zorder(2, 3);
+    let b = zorder(3, 2);
+
+    print!("z(2,3)={} z(3,2)={}", a, b);
+}
+"""
+id = "a022bc9b-551c-4976-98de-361a624c5ca8"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Run a clustering-audit job that samples representative queries from the analyst log, plans each query against the current table layout, and computes the files-scanned ratio against a hypothetical no-clustering baseline. Sustained ratios below 0.3 are healthy; drift above 0.3 indicates the clustering needs revisiting against the actual workload."
+prompt.distractors = [
+  "Compare the file count of the clustered table against the file count of an unclustered baseline. Smaller is better.",
+  "Measure the compressed size of the clustered table against the unclustered baseline. Smaller is better, because clustered data has more uniform statistics.",
+  "Count the dictionary-fallback events on the clustered table. Fewer fallbacks means the clustering is producing more uniform distributions, which is the goal."
+]
+prompt.prompt = """
+The Artemis archive has been Z-order clustered on (payload_id, sensor_kind) for six months. How does the platform team verify the clustering is still effective for the current workload?
+"""
+context = "The metric that matters is files-scanned-per-query, because that is what determines query latency. A clustering scheme that reduces files scanned by 10× is winning; a scheme that produces tighter statistics but doesn't reduce files scanned is doing nothing useful. The audit-job pattern in the lesson is the disciplined way to measure this: take real queries, plan them, compute the ratio against the unclustered counterfactual, alert on drift. File count and compressed size are not directly correlated to query performance; dictionary fallback is a Module 1 concern and is unrelated to clustering effectiveness."
+id = "6a02da78-d1ba-4943-9e73-774d4e6bd825"

@@ -1,0 +1,107 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Every commit records writer ID, writer commit hash, input snapshot IDs, and trigger metadata in the snapshot's summary field. The audit team queries the snapshot history months later to identify the producer, the binary version, the upstream data, and the human operator who triggered each commit."
+prompt.distractors = [
+  "Every commit is correlated to a separate audit-trail database via a foreign key in the snapshot. The audit database holds the lineage; the snapshot holds only a reference. The audit DB is queried independently of the table format.",
+  "Every commit is timestamped and the audit trail is reconstructed from the timestamp by correlating against external job-scheduling logs. No lineage is stored in the commit itself.",
+  "Every commit is signed cryptographically by the producing writer. The signature identifies the writer; no additional metadata is recorded."
+]
+prompt.prompt = """
+A data-quality issue is discovered in the Artemis archive. The audit team needs to identify which writer produced the data, when, and against what input. How is this query answered in a lakehouse with proper lineage discipline?
+"""
+context = "The lineage discipline is to record audit-relevant metadata in the snapshot summary at commit time. The Iceberg snapshot.summary field is a key-value map; the operator chooses the keys to require. The Artemis schema includes writer ID (which service), commit hash (which binary version), input snapshot IDs (which upstream data), and trigger info (why this commit). The audit team queries the snapshot history (every snapshot's summary is accessible) and answers questions like 'what binary produced this data' or 'which downstream snapshots consumed this bad input'. The other options describe alternative designs: external audit DB adds operational complexity for the same answers; timestamp-only is too thin; cryptographic signatures don't carry enough information. The in-snapshot summary is the simplest and most reliable approach."
+id = "f02cc704-67b7-4696-a7d5-6f5a17413037"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Failed commits leave behind metadata files (and sometimes data files) from speculative attempts that were superseded by the writer's retry. Aborted compactions leave their consolidated output file behind. Interrupted multi-file writes leave partial data files. None of these are referenced by any reachable snapshot's manifests."
+prompt.distractors = [
+  "Orphan files are caused by malicious writers attempting to corrupt the table; the cleanup is a security mechanism.",
+  "Orphan files are intentional caches of intermediate results that improve query performance; the cleanup is a cache-eviction policy.",
+  "Orphan files come from snapshots that were rolled back via a schema-revert commit; the rollback doesn't delete the files automatically."
+]
+prompt.prompt = """
+A reconciliation scan finds files in the object store that no metadata references. What are the typical sources of these orphan files?
+"""
+context = "Orphans are the debris of failed or interrupted operations. The Module 2 Lesson 3 retry loop writes metadata files speculatively before the CAS; on conflict, those files are abandoned. Compaction (Module 6 Lesson 1) writes consolidated output before its CAS; if the compaction is no longer applicable (the sanity check fails), the output is abandoned. Crashed writers may have written some data files before the crash; the not-yet-committed files are abandoned. None of this is malicious or intentional caching — it's the expected cost of optimistic concurrency and best-effort recovery. The cleanup job reconciles the object store against the metadata: anything in the object store not referenced by any reachable snapshot, that is old enough to be safely classified as not-in-flight, is an orphan."
+id = "0ce87508-d6ac-4366-a236-dac70d30ff96"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Files younger than a minimum-age threshold (7 days for Artemis) are skipped to avoid misclassifying in-flight writes as orphans. Files associated with currently-active writers are also skipped, regardless of age, by consulting the writers' heartbeats."
+prompt.distractors = [
+  "Files referenced by any pending CAS attempt are skipped. The cleanup job reads the catalog's transaction log to identify pending attempts.",
+  "Files larger than a minimum size are skipped because small files are more likely to be in-flight writes that have not yet been finalized.",
+  "Files whose paths contain a writer-supplied 'do not delete' marker are skipped. Writers add the marker to files they're actively producing."
+]
+prompt.prompt = """
+Orphan cleanup must avoid deleting in-flight writes that haven't yet been committed. What's the discipline that distinguishes orphans from in-flight files?
+"""
+context = "The two-guard pattern (minimum-age threshold plus active-writer tracking) covers both routine and long-running writes. The age threshold (7 days) catches the common case: an ingest write that hasn't been committed yet is by definition newer than 7 days; it's safely skipped. The active-writer tracking catches the long-running case: a backfill that's been running for two weeks pre-dates the age threshold but is still active; its in-progress files are listed by the writer's heartbeat and skipped explicitly. The combination handles every realistic in-flight scenario without false positives. The other options describe heavier-weight mechanisms that the lakehouse doesn't need (CAS-log inspection, size-based heuristics, opt-in markers)."
+id = "ac46951d-714a-4bf5-94f2-a2f6166a8c18"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "deleted=3 skipped_young=1 skipped_active=1"
+context = "The orphan classification: a file is deleted if it is not in the reachable set AND it is older than the minimum-age threshold AND it is not in the active-writers set. Walking through the example files:\n- 'data/a.parquet' (age 10 days, not reachable, not active): old enough, not reachable, not active → delete.\n- 'data/b.parquet' (age 10 days, reachable): in reachable set → skip (counted neither young nor active).\n- 'data/c.parquet' (age 3 days, not reachable, not active): too young → skipped_young.\n- 'data/d.parquet' (age 10 days, not reachable, active): in active set → skipped_active.\n- 'metadata/m1.avro' (age 15 days, not reachable, not active): old enough, not reachable, not active → delete.\n- 'metadata/m2.avro' (age 20 days, not reachable, not active): old enough, not reachable, not active → delete.\nResults: deleted = 3 (a, m1, m2), skipped_young = 1 (c), skipped_active = 1 (d). The reachable file 'b' is silently skipped (it's not an orphan to consider)."
+prompt.program = """
+use std::collections::HashSet;
+
+fn main() {
+    const MIN_AGE_DAYS: u32 = 7;
+
+    // (path, age_in_days)
+    let files: Vec<(&str, u32)> = vec![
+        ("data/a.parquet",    10),
+        ("data/b.parquet",    10),
+        ("data/c.parquet",     3),
+        ("data/d.parquet",    10),
+        ("metadata/m1.avro",  15),
+        ("metadata/m2.avro",  20),
+    ];
+
+    // The reachable set (referenced by some reachable snapshot's manifests).
+    let reachable: HashSet<&str> = vec!["data/b.parquet"].into_iter().collect();
+
+    // Files known to be associated with currently-active writers.
+    let active_writers: HashSet<&str> = vec!["data/d.parquet"].into_iter().collect();
+
+    let mut deleted = 0u32;
+    let mut skipped_young = 0u32;
+    let mut skipped_active = 0u32;
+
+    for (path, age) in &files {
+        if reachable.contains(path) {
+            continue; // already in the table; not an orphan candidate
+        }
+        if active_writers.contains(path) {
+            skipped_active += 1;
+            continue;
+        }
+        if *age < MIN_AGE_DAYS {
+            skipped_young += 1;
+            continue;
+        }
+        // All guards passed; this is an orphan and is safe to delete.
+        deleted += 1;
+    }
+
+    print!("deleted={} skipped_young={} skipped_active={}", deleted, skipped_young, skipped_active);
+}
+"""
+id = "bd55c49d-f8cf-4cc1-94cb-c23a0256fb53"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The schedule is daily expiration plan, then storage-tier handoff, then Phase-2 physical delete, then orphan cleanup, with compaction running continuously in the background within bandwidth budgets. The ordering ensures expiration's deletes produce a clean state for orphan cleanup; compaction's continuous nature lets it consume only spare capacity."
+prompt.distractors = [
+  "All four jobs run simultaneously in a daily maintenance window. The window blocks all queries; the jobs share the bandwidth equally; analyst traffic resumes after the window.",
+  "The jobs are scheduled at random intervals to avoid synchronized peaks of resource use. Each job runs on its own schedule independent of the others; conflicts are resolved by job-level retries.",
+  "Only one of the four jobs runs per day, on a weekly rotation: Monday compaction, Tuesday expiration, Wednesday orphan cleanup, Thursday lineage. The rotation keeps each day's load light."
+]
+prompt.prompt = """
+The Artemis lifecycle worker runs four maintenance jobs: compaction, snapshot expiration, orphan cleanup, and lineage/manifest compaction. How are they scheduled to avoid conflicts and maximize maintenance throughput?
+"""
+context = "The Artemis lifecycle worker runs the jobs in a deliberate ordering with deliberate scheduling. Expiration's three phases run in sequence overnight (plan, tier handoff, physical delete); orphan cleanup runs after expiration so that the day's expiration debris is included; compaction runs continuously with bandwidth caps because its work is dominated by I/O and benefits from spreading. The ordering choices avoid cascading rework: running orphan cleanup before expiration would miss the day's expiration debris; running compaction in a single window would either be too short (the work doesn't fit) or block queries (too long). The discipline is the operational standard for production lakehouses; the specific times are an Artemis-team time-zone choice but the structure is universal."
+id = "b66f8e84-f266-4161-baee-8f95b2a6a606"

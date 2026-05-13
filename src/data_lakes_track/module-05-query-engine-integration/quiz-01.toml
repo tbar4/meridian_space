@@ -1,0 +1,89 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Exact, Inexact, or Unsupported. Exact means the storage prunes completely; Inexact means the storage prunes approximately and the engine reapplies as a residual filter; Unsupported means the engine handles the predicate entirely."
+prompt.distractors = [
+  "Two: Supported (engine drops the predicate) and Unsupported (engine handles it). The third state would create ambiguity.",
+  "Four: Exact, Inexact-Conservative, Inexact-Liberal, and Unsupported. The conservative/liberal distinction handles the asymmetry between false positives and false negatives.",
+  "One: every predicate is either pushable or not. Pushable predicates are evaluated exactly by the storage."
+]
+prompt.prompt = """
+The predicate-pushdown contract classifies each predicate into one of several levels. How many levels, and what are they?
+"""
+context = "The three-way classification is the standard contract across query engines (DataFusion, Spark, Trino). Exact predicates are dropped by the engine because the storage handled them completely. Inexact predicates remain in the engine as a residual filter because the storage's pruning was approximate (some surviving rows may not match). Unsupported predicates are handled entirely by the engine because the storage cannot evaluate them at all. The two-way and one-way alternatives lose information; the four-way distinction is unnecessary — 'inexact-liberal' (false negatives) is forbidden by the correctness asymmetry."
+id = "4de550a0-9eb7-48cf-b2a2-3c6258ae4a57"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Conjunction pushes the supported branches and reapplies any dropped (unsupported) branch as a residual filter — `A AND B` with B unsupported pushes A and reapplies the full `A AND B`. Disjunction does not allow dropping any branch — `A OR B` with B unsupported is itself unsupported, because dropping B would silently exclude matching rows."
+prompt.distractors = [
+  "Conjunction and disjunction behave the same: both push only when every branch is at least supported. Asymmetric handling would be a correctness bug.",
+  "Conjunction pushes only when every branch is exact; any inexact or unsupported branch makes the conjunction unsupported. Disjunction is the same.",
+  "Conjunction never pushes; disjunction always pushes. The asymmetry comes from the algebraic structure of the operators."
+]
+prompt.prompt = """
+The predicate `A AND B` is pushed differently than `A OR B` when one of the branches (B) is unsupported. What's the rule, and why?
+"""
+context = "The asymmetry follows from the false-positive vs false-negative asymmetry. In a conjunction A AND B, dropping B is equivalent to replacing it with TRUE (since `A AND TRUE = A`); this is safe because the engine reapplies the full conjunction as a residual filter, eliminating any false positives. In a disjunction A OR B, dropping B is equivalent to replacing it with FALSE (since `A OR FALSE = A`); this is unsafe because the engine cannot 'add back' the rows that should have matched B — they would never make it into the result set in the first place. The push logic must respect this asymmetry; the conservative behavior is to mark disjunctions with any unsupported branch as fully unsupported."
+id = "c6f1492f-e2ca-4630-b9b7-e12379ccca77"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The engine wraps the storage's RecordBatchStream in a FilterExec operator that evaluates the inexact (and unsupported) predicates against each row in each batch, dropping rows that do not match. Pruning made the input smaller; the filter makes the output exact."
+prompt.distractors = [
+  "The engine flags the inexact predicate and surfaces a warning to the user; the user must either accept the loose result or rewrite the query to use exact predicates.",
+  "The engine retries the scan with a different set of predicates that lift to exact pushdown. Inexact pushdown is treated as a planning failure to retry around.",
+  "The engine ignores the inexact classification; the storage is trusted to have done its best, and any imprecision is accepted as part of the query's result."
+]
+prompt.prompt = """
+The storage layer classifies a predicate as Inexact and prunes accordingly. What does the query engine do with the storage's result?
+"""
+context = "The residual filter is what makes predicate pushdown a pure optimization. The storage narrows the search; the engine applies the precise predicate to the survivors. The engine never trusts the storage to have produced exact results from an inexact pushdown — that would be a correctness bug. The FilterExec is cheap relative to the work the storage saved: a typical inexact pushdown returns 2-10× more files than an exact one, but those files are still 100× smaller than the full table; the per-row filter cost on the read data is dwarfed by the I/O the storage's pruning avoided. The other options describe behaviors that would be wrong (warning the user is not an answer; retrying is overhead; ignoring is incorrect)."
+id = "21f2ccdf-ba66-419c-b452-6f82ed134781"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "pushed=2 residual=2 unsupported=1"
+context = "The classification walks the predicate tree. The predicates in the example: `mission_id = 'apollo-7'` is on an identity-partitioned column with equality — pushed exact. `day_ts BETWEEN d1 AND d2` is on a day-transformed partition with a range — pushed exact (day-transform admits tight lifting for ranges). `payload_id > 5` is on a non-partition column with statistics — pushed inexact (the per-file stats prune some files but residual filtering is needed). `UPPER(notes) = 'X'` is a function call on a column — unsupported (the storage's stats are on the column's bytes, not on UPPER(bytes)). `voltage > 28.5` is a non-partition column with statistics — pushed inexact. Counts: 2 exact (which the engine drops from residual), 2 inexact (kept in residual), 1 unsupported (also in residual). 'Pushed' in the output sums exact (2). 'Residual' sums inexact + unsupported (2 inexact stays in residual; unsupported is engine-only). Wait — let me recount: exact = 2 (pushed), inexact = 2 (residual), unsupported = 1 (also engine-side). Total residual that the engine reapplies: inexact (2) + unsupported (1) = 3. The output asked for `pushed` (predicates dropped from residual, i.e., exact only) = 2; `residual` (inexact predicates pushed AND kept) = 2; `unsupported` = 1. The expected output reflects this split."
+prompt.program = """
+fn main() {
+    // Simulate the classifier output for 5 predicates against the
+    // Artemis SDA table (partition spec: identity(mission_id), day(ts)).
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Pushdown { Exact, Inexact, Unsupported }
+
+    let classifications: Vec<Pushdown> = vec![
+        // mission_id = 'apollo-7' — identity partition + equality
+        Pushdown::Exact,
+        // day(ts) BETWEEN d1 AND d2 — day-transform + range
+        Pushdown::Exact,
+        // payload_id > 5 — non-partition numeric column
+        Pushdown::Inexact,
+        // UPPER(notes) = 'X' — function call on column
+        Pushdown::Unsupported,
+        // voltage > 28.5 — non-partition numeric column
+        Pushdown::Inexact,
+    ];
+
+    let pushed = classifications.iter().filter(|p| **p == Pushdown::Exact).count();
+    let residual = classifications.iter().filter(|p| **p == Pushdown::Inexact).count();
+    let unsupported = classifications.iter().filter(|p| **p == Pushdown::Unsupported).count();
+
+    print!("pushed={} residual={} unsupported={}", pushed, residual, unsupported);
+}
+"""
+id = "3ce46136-4814-48b9-99ee-bd1e6234133d"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Projection pushdown tells the storage which columns the query actually uses, so the storage reads only those columns from Parquet (skipping the byte ranges of unused columns). Without projection pushdown, the storage returns every column of every read file, even if the query uses only a few."
+prompt.distractors = [
+  "Projection pushdown duplicates the work of predicate pushdown — both narrow the read. The engine typically enables only one of them at a time based on query characteristics.",
+  "Projection pushdown is a debugging feature: the engine pushes the projection to verify the storage's schema; in production deployments it is disabled to reduce overhead.",
+  "Projection pushdown is for streaming queries; predicate pushdown is for batch queries. The two cannot be combined."
+]
+prompt.prompt = """
+Projection pushdown is the partner to predicate pushdown. What does projection pushdown do, and why is it considered a separate optimization?
+"""
+context = "Projection pushdown and predicate pushdown are orthogonal and complementary. Predicate pushdown narrows the *rows* read (by pruning files and row groups); projection pushdown narrows the *columns* read (by reading only required columns from each file). Both rely on the column-store property that columns can be read independently: Parquet's per-column-chunk structure means skipping a column means skipping its bytes. A query that uses 3 of 30 columns and has a selective predicate sees roughly a 100x reduction in I/O from the predicate (file pruning) and a further 10x from the projection (column skipping); the two compound for ~1000x total. Disabling either pushdown defeats this; the storage and engine must support both."
+id = "f3a1328a-9c37-4c31-9725-bc6361750e0d"
