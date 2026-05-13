@@ -1,0 +1,92 @@
+[[questions]]
+id = "789cfcce-7abc-f061-7283-940516273849"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Use a single-machine mutex protected by stronger memory ordering primitives.",
+    "Increase the lock service's leader election timeout to prevent split-brain.",
+    "Add retries with exponential backoff to the lock acquisition path.",
+]
+answer.answer = "Add fencing tokens: the lock service issues a monotonically increasing token with each lease; the protected resource rejects writes with a token older than the highest seen."
+context = "The April incident is a holder-pauses-past-lease-expiry scenario. The fix is fencing: the storage layer (registry) tracks the highest fencing token it has seen and rejects stale tokens. When the paused holder resumes with token 42 and the new holder has been writing with token 43, the storage rejects the stale write. A single-machine mutex is wrong category — the problem is distributed. Election timeout doesn't address the holder pause. Retries don't address the safety problem; the writes are succeeding, just from the wrong holder."
+prompt.prompt = """
+The April incident: two registry instances simultaneously believed they held the daily-merge lock, after a GC pause caused the first instance's lease to expire and be reassigned. What is the canonical fix?
+"""
+
+[[questions]]
+id = "89adce0e-8abc-1172-8394-051627384950"
+type = "MultipleChoice"
+prompt.distractors = [
+    "The lease service was not configured with enough memory.",
+    "The holder forgot to release the lease when it crashed.",
+    "Two-phase commit was used instead of consensus.",
+]
+answer.answer = "The lease holder's process was alive but unresponsive (e.g., paused for GC or swap) for longer than the lease duration; the lease service then granted the lease to another holder; both processes then believed they held the lock."
+context = "The 'holder pauses' failure mode is the canonical failure of leases without fencing. The original holder is still running, just blocked on I/O or GC; the lock service's failure detector times them out and grants the lock to someone else; on resumption, the original holder continues as if nothing happened. The other choices describe unrelated failure modes (memory, crash detection, transaction protocol). This is why fencing tokens exist."
+prompt.prompt = """
+Why specifically can leases alone (without fencing tokens) produce two simultaneous lock holders despite the lease service being correctly implemented?
+"""
+
+[[questions]]
+id = "9abedf1f-9abc-2283-9405-162738495061"
+type = "Tracing"
+prompt.program = """
+use std::sync::Mutex;
+
+struct ProtectedResource {
+    highest_token: Mutex<u64>,
+}
+
+impl ProtectedResource {
+    fn write(&self, token: u64) -> Result<(), &'static str> {
+        let mut h = self.highest_token.lock().unwrap();
+        if token < *h {
+            return Err(\"fencing rejection\");
+        }
+        *h = token;
+        Ok(())
+    }
+}
+
+fn main() {
+    let r = ProtectedResource { highest_token: Mutex::new(0) };
+    println!(\"{:?}\", r.write(5));
+    println!(\"{:?}\", r.write(7));
+    println!(\"{:?}\", r.write(6));
+    println!(\"{:?}\", r.write(10));
+    println!(\"{:?}\", r.write(7));
+}
+"""
+answer.doesCompile = true
+answer.stdout = "Ok(())\nOk(())\nErr(\"fencing rejection\")\nOk(())\nErr(\"fencing rejection\")"
+context = "Token 5: highest was 0, accept, highest becomes 5. Token 7: 7 >= 5, accept, highest becomes 7. Token 6: 6 < 7, REJECT (fencing rejection). Token 10: 10 >= 7, accept, highest becomes 10. Token 7: 7 < 10, REJECT. The fencing pattern enforces monotonicity at the resource level — any write with a token older than the highest seen is rejected, which is what prevents a deposed holder from corrupting state."
+prompt.prompt = """
+A fencing-token-validating storage resource. What does this program print?
+"""
+
+[[questions]]
+id = "abcfe020-aabc-3394-0516-273849506172"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Storing the application's primary data, because consensus makes it durable.",
+    "High-throughput event streaming.",
+    "Caching frequently-accessed query results.",
+]
+answer.answer = "Storing small, slowly-changing, high-value state — cluster membership, leader election, configuration."
+context = "Coordination services like etcd and ZooKeeper are designed for the consensus layer's user-facing API: small data, low write rate, strong consistency. Using them for primary data storage is a classic anti-pattern — the consensus overhead per write is too high. Using them for event streaming is wrong (use Kafka). Using them as cache is wrong (use Redis or similar). The right use case is metadata-shaped problems where strong consistency matters more than throughput."
+prompt.prompt = """
+A team is choosing a use case for ZooKeeper. Which use case is what coordination services are designed for?
+"""
+
+[[questions]]
+id = "bcd0f131-babc-44a5-1627-384950617283"
+type = "MultipleChoice"
+prompt.distractors = [
+    "wall-clock time (e.g., SystemTime::now())",
+    "logical (Lamport) time",
+    "the lock service's internal clock, queried via RPC"
+]
+answer.answer = "monotonic time (e.g., Instant::elapsed())"
+context = "Lease renewal needs to measure 'how long since I acquired/renewed' which is a duration, not an absolute time. Monotonic clocks are guaranteed to never go backward and are correct for measuring durations. Wall-clock time can jump backward (NTP correction) and produce premature or delayed renewals. Logical time has no relationship to physical duration. Querying the lock service for the time defeats the purpose (it's the round-trip itself we need to account for). Use Instant::elapsed for monotonic duration measurement."
+prompt.prompt = """
+What time source should a lease-renewal loop use to determine when to renew?
+"""

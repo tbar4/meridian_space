@@ -1,0 +1,91 @@
+[[questions]]
+id = "cde10242-cabc-55b6-2738-495061728394"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Round-robin",
+    "Random selection",
+    "Consistent hashing"
+]
+answer.answer = "Power-of-two-choices (P2C)"
+context = "P2C picks two instances at random and routes to the less-loaded of the two. It produces near-optimal load distribution under heterogeneous instance capacity (the slow instance gets fewer requests because it loses more comparisons), requires no cross-caller coordination, and runs in O(1) per call. Round-robin and random give every instance equal share regardless of load — the slow instance accumulates backlog. Consistent hashing is the wrong tool here; it's for affinity, not load balancing across equivalent instances."
+prompt.prompt = """
+A service has 10 instances. One instance is running slow (capacity reduced 50%). A load balancer with no shared state across callers needs to route around the slow instance. Which algorithm is the right default?
+"""
+
+[[questions]]
+id = "def21353-dabc-66c7-3849-506172839405"
+type = "MultipleChoice"
+prompt.distractors = [
+    "DNS-based discovery with short TTLs",
+    "Static configuration files updated by an orchestrator",
+    "Server-side load balancer that periodically polls the registry"
+]
+answer.answer = "Consistent hashing with virtual nodes"
+context = "Cache affinity requires that the same key always routes to the same instance (until the instance set changes). Consistent hashing maps keys to instances deterministically; the same TLE id always hashes to the same instance, maximizing cache hit rate. Virtual nodes smooth the distribution. DNS is for instance discovery, not request routing. Static configuration is a coarse mechanism unrelated to per-request routing. A server-side load balancer using P2C or round-robin doesn't preserve key affinity."
+prompt.prompt = """
+The catalog's read tier serves TLE lookups. The team wants each TLE id consistently routed to the same replica so its in-memory cache stays warm. Which discovery/routing pattern fits?
+"""
+
+[[questions]]
+id = "ef322464-eabc-77d8-4950-617283940516"
+type = "Tracing"
+prompt.program = """
+use std::collections::BTreeMap;
+
+struct Ring { positions: BTreeMap<u32, &'static str> }
+
+impl Ring {
+    fn lookup(&self, key: u32) -> Option<&'static str> {
+        self.positions.range(key..).next()
+            .or_else(|| self.positions.iter().next())
+            .map(|(_, v)| *v)
+    }
+}
+
+fn main() {
+    let mut r = Ring { positions: BTreeMap::new() };
+    r.positions.insert(10, \"A\");
+    r.positions.insert(50, \"B\");
+    r.positions.insert(90, \"C\");
+
+    print!(\"{:?} \", r.lookup(5));
+    print!(\"{:?} \", r.lookup(10));
+    print!(\"{:?} \", r.lookup(40));
+    print!(\"{:?} \", r.lookup(70));
+    print!(\"{:?}\", r.lookup(95));
+}
+"""
+answer.doesCompile = true
+answer.stdout = "Some(\"A\") Some(\"A\") Some(\"B\") Some(\"C\") Some(\"A\")"
+context = "Ring positions: 10=A, 50=B, 90=C. lookup finds the smallest position >= key. lookup(5): next position >= 5 is 10 → A. lookup(10): exact match at 10 → A. lookup(40): next >= 40 is 50 → B. lookup(70): next >= 70 is 90 → C. lookup(95): no position >= 95, wrap around to first → A. The wrap-around is what makes the ring 'ring-shaped': beyond the largest position, lookups wrap to the smallest. Adding or removing one instance only moves the keys that map to that instance's arc."
+prompt.prompt = """
+A consistent hash ring with three instances. What does this program print?
+"""
+
+[[questions]]
+id = "f0433575-fabc-88e9-5061-728394051627"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Use TTL-based registration expiry only.",
+    "Use active health probes from the registry only.",
+    "Remove instances from the registry when they fail any single request."
+]
+answer.answer = "Combine TTL-based registration expiry with passive health detection at the client (per-instance failure rate tracking)."
+context = "The failure mode in the question (200 to /health, 500 to actual requests) defeats active health probes — the probe passes. The cure is passive detection: track per-instance failure rates on actual application traffic. Combined with TTL expiry (which still catches hard crashes), you get coverage of both failure shapes. Removing on a single failure is too aggressive (transient errors are normal); active probes alone miss the application-vs-health-endpoint divergence."
+prompt.prompt = """
+A service registry uses TTL-based expiry and active health probes. A failing instance still passes its /health endpoint but returns 500 to actual requests. What is the correct addition?
+"""
+
+[[questions]]
+id = "01544686-0abc-99fa-6172-839405162738"
+type = "MultipleChoice"
+prompt.distractors = [
+    "The detectors will be more reliable because each can be tuned for its specific use case.",
+    "The system will detect failures faster than with a single detector.",
+    "The detectors will produce stronger consistency guarantees by cross-checking."
+]
+answer.answer = "The detectors will interact in unintended ways (flapping, contradictory states), because their thresholds and timeouts are not coordinated."
+context = "Three independent detectors with different thresholds will frequently disagree: discovery removes the instance at 5s; load balancer re-includes at 10s when its window expires; circuit breaker hasn't tripped yet. The result is rapid alternation that nobody designed. The fix from Module 4 — single suspicion signal, multiple thresholds — keeps the consumers in coherent states. The other options are the rationalizations operators tell themselves before discovering the interaction pathologies."
+prompt.prompt = """
+A team has separate liveness mechanisms for service discovery, load balancing, and circuit breaking — each with its own timeouts and thresholds. Why does the Module 4 lesson argue this is worse than a single failure detector with multiple thresholds?
+"""

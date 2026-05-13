@@ -1,0 +1,88 @@
+[[questions]]
+id = "12565657-1abc-99a0-2738-495061728394"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Owner uses FIFO from the front; thieves use LIFO from the back.",
+    "Both owner and thieves use the same end of the deque.",
+    "Both owner and thieves use FIFO from the front."
+]
+answer.answer = "Owner uses LIFO from the back (cache-friendly); thieves use FIFO from the front (coarse-grained steal-value)."
+context = "The asymmetric access is the defining property of work-stealing deques. The owner pushes and pops from one end (the 'back') in LIFO order — recently-created tasks reference recently-touched data, which is cache-friendly. Thieves pop from the other end (the 'front') in FIFO order — oldest tasks are typically coarsest-grained, giving the thief the most work per steal. The two ends only require synchronization when they converge (near-empty deque), making the common case essentially lock-free."
+prompt.prompt = """
+A work-stealing deque has an asymmetric access pattern. Which describes it correctly?
+"""
+
+[[questions]]
+id = "23676768-2abc-aab1-8394-051627384950"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Fine-grained intra-process work stealing.",
+    "Migration of any job at any time when imbalance is detected.",
+    "Continuous rebalancing using a centralized scheduler."
+]
+answer.answer = "Coarse-grained task migration: monitor for significant imbalance, migrate a batch job with low migration cost, accept the pause cost as one-time."
+context = "Cluster-level cross-machine redistribution is too expensive for work-stealing-style continuous balancing. The migration cost (state transfer, cache cold-start, connection re-establishment) is hundreds of milliseconds — too high to do continuously. The right pattern is occasional, deliberate migration when imbalance is significant, prefer migrating jobs with low migration cost (batch jobs over stateful ones). 'Fine-grained' is the in-process work-stealing pattern, not cluster-level. 'Any job at any time' is too aggressive. A centralized scheduler is fine but the pattern is coarse-grained, not continuous."
+prompt.prompt = """
+The cluster scheduler observes a load imbalance across machines: one machine is at 90% utilization, two others are at 40%. Which redistribution pattern is appropriate for cluster-level rebalancing?
+"""
+
+[[questions]]
+id = "34787879-3abc-bbc2-9405-162738495061"
+type = "Tracing"
+prompt.program = """
+use std::collections::VecDeque;
+
+struct Deque<T> { inner: VecDeque<T> }
+
+impl<T: Clone + std::fmt::Debug> Deque<T> {
+    fn new() -> Self { Self { inner: VecDeque::new() } }
+    fn push(&mut self, t: T) { self.inner.push_back(t); }       // owner
+    fn pop(&mut self) -> Option<T> { self.inner.pop_back() }    // owner LIFO
+    fn steal(&mut self) -> Option<T> { self.inner.pop_front() } // thief FIFO
+}
+
+fn main() {
+    let mut d: Deque<i32> = Deque::new();
+    d.push(1); d.push(2); d.push(3); d.push(4); d.push(5);
+
+    print!(\"{:?} \", d.pop());     // owner
+    print!(\"{:?} \", d.steal());   // thief
+    print!(\"{:?} \", d.pop());     // owner
+    print!(\"{:?} \", d.steal());   // thief
+    print!(\"{:?}\", d.pop());      // owner
+}
+"""
+answer.doesCompile = true
+answer.stdout = "Some(5) Some(1) Some(4) Some(2) Some(3)"
+context = "Initial deque: [1,2,3,4,5]. Owner pop (LIFO from back): 5, deque now [1,2,3,4]. Thief steal (FIFO from front): 1, deque now [2,3,4]. Owner pop: 4, deque now [2,3]. Thief steal: 2, deque now [3]. Owner pop: 3, deque empty. The asymmetric access pattern is visible: owner always gets the most recently pushed (cache-friendly); thief always gets the oldest (coarse-grained)."
+prompt.prompt = """
+A work-stealing deque with owner and thief operations interleaved. What does this program print?
+"""
+
+[[questions]]
+id = "458989a0-4abc-ccd3-0516-273849506172"
+type = "MultipleChoice"
+prompt.distractors = [
+    "The migration cost is always lower than the imbalance cost.",
+    "Work stealing applies equally well at the cluster level as in-process.",
+    "Cross-region migration is generally faster than cross-rack migration."
+]
+answer.answer = "Migration introduces a pause; for latency-critical workloads, the pause may exceed the latency budget, making migration the wrong tool."
+context = "The right reason to not migrate is the cost of the pause. Migration involves stopping the job, transferring state, and resuming — all of which interrupt service. For workloads with sub-millisecond latency budgets, this interruption breaks the SLO. For long-running stateful jobs, the migration cost can exceed the value of rebalancing. The other options are wrong: migration cost is sometimes higher than the imbalance cost (that's the whole question); work stealing's fine granularity doesn't fit cluster-level operations; cross-region is slower, not faster."
+prompt.prompt = """
+Why does the lesson recommend NOT migrating jobs for latency-critical real-time workloads, even when load imbalance is observed?
+"""
+
+[[questions]]
+id = "569a9aa1-5abc-dde4-1627-384950617283"
+type = "MultipleChoice"
+prompt.distractors = [
+    "tokio::spawn always pins tasks to a specific worker.",
+    "local_set is faster than tokio::spawn for all workloads.",
+    "tokio::spawn requires explicit locality hints from the caller."
+]
+answer.answer = "tokio::spawn uses work-stealing across the pool; local_set keeps a set of tasks pinned to a single worker, preserving cache-resident state at the cost of lost load-balancing benefits."
+context = "The constellation's image-processing pipeline uses local_set for stages where keeping the working set in CPU cache is more valuable than the work-stealing redistribution. tokio::spawn uses work-stealing — tasks can migrate across worker threads to balance load — but this means cache state is lost when a task migrates. local_set is the opposite: keep tasks on one worker, lose load-balancing flexibility but keep the cache warm. The choice is workload-specific: cache-heavy stages benefit from local_set; CPU-bound work that doesn't depend heavily on cache benefits from spawn's stealing."
+prompt.prompt = """
+The constellation uses tokio's local_set for some image-processing stages and tokio::spawn for others. Why?
+"""

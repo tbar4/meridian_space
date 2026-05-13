@@ -1,0 +1,94 @@
+[[questions]]
+id = "fa1b2c3d-4e5f-6a7b-8c9d-0e1f2a3b4c5d"
+type = "MultipleChoice"
+prompt.distractors = [
+    "The system can have only two of {Consistency, Availability, Partition tolerance}.",
+    "Networks rarely partition, so CAP rarely applies in practice.",
+    "Linearizable reads are always faster than eventually consistent reads.",
+]
+answer.answer = "During a partition, the system must choose between linearizability and availability; partition tolerance is not optional."
+context = "The classic 'pick two of three' framing is misleading because partition tolerance is a property of the network, not a design choice — partitions will happen. The actual content of CAP is that during a partition, you must choose between continuing to serve requests (availability) and refusing requests that would violate linearizability (consistency). The other options are common misstatements: 'two of three' (the misleading frame), partitions being rare (wrong on any real network), and linearizable reads being faster (the opposite — linearizable reads pay coordination costs)."
+prompt.prompt = """
+A teammate states: 'CAP says we have to pick two of {Consistency, Availability, Partition tolerance}.' Which statement most accurately corrects or refines this?
+"""
+
+[[questions]]
+id = "eb2c3d4e-5f6a-7b8c-9d0e-1f2a3b4c5d6e"
+type = "MultipleChoice"
+prompt.distractors = [
+    "PA/EC",
+    "PC/EL",
+    "PA/EL",
+]
+answer.answer = "PC/EC"
+context = "etcd uses Raft (Module 3) for strong consistency and rejects writes that cannot achieve a majority during a partition (PC) and pays the coordination latency in normal operation (EC). PA/EC would mean accepting writes during partitions (etcd does not). PC/EL would mean rejecting during partitions but trading consistency for latency in normal operation (etcd does not — it pays the latency). PA/EL is the Dynamo-style position, the opposite of etcd."
+prompt.prompt = """
+The Constellation Operations team is evaluating etcd for storing leader-election state. etcd uses the Raft consensus protocol, requires a majority of nodes to accept writes, and rejects writes when no majority is reachable. Which PACELC cell describes etcd?
+"""
+
+[[questions]]
+id = "dc3d4e5f-6a7b-8c9d-0e1f-2a3b4c5d6e7f"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Linearizability is a property of a single object; serializability is a property of a set of transactions over multiple objects.",
+    "Linearizability constrains real-time ordering; serializability constrains only logical equivalence to some serial order.",
+    "A snapshot-isolation database is serializable but not linearizable, because reads see a snapshot rather than the latest committed value.",
+]
+answer.answer = "Linearizability implies serializability."
+context = "Linearizability is a single-object property; serializability is a multi-transaction property. They are largely independent. A system can be linearizable for individual operations but allow non-serializable interleavings of transactions. A snapshot-isolation system is serializable but not linearizable. The combination — strict serializability — is what Spanner offers, and it's the strongest model. The other statements in the choices are all correct, which is why the false claim is the one that is genuinely false."
+prompt.prompt = """
+Which of the following statements about linearizability and serializability is FALSE?
+"""
+
+[[questions]]
+id = "cd4e5f6a-7b8c-9d0e-1f2a-3b4c5d6e7f8a"
+type = "Tracing"
+prompt.program = """
+use std::collections::HashMap;
+
+#[derive(Clone)]
+struct Versioned { clock: HashMap<&'static str, u64> }
+
+fn dominates(a: &Versioned, b: &Versioned) -> bool {
+    let mut strictly_greater = false;
+    let keys: std::collections::HashSet<&&'static str> =
+        a.clock.keys().chain(b.clock.keys()).collect();
+    for k in keys {
+        let av = a.clock.get(k).copied().unwrap_or(0);
+        let bv = b.clock.get(k).copied().unwrap_or(0);
+        if av < bv { return false; }
+        if av > bv { strictly_greater = true; }
+    }
+    strictly_greater
+}
+
+fn main() {
+    let x = Versioned { clock: HashMap::from([(\"n1\", 2), (\"n2\", 1)]) };
+    let y = Versioned { clock: HashMap::from([(\"n1\", 2), (\"n2\", 2)]) };
+    let z = Versioned { clock: HashMap::from([(\"n1\", 1), (\"n2\", 3)]) };
+    print!(\"{} \", dominates(&y, &x));
+    print!(\"{} \", dominates(&x, &y));
+    print!(\"{} \", dominates(&y, &z));
+    print!(\"{}\", dominates(&z, &y));
+}
+"""
+answer.doesCompile = true
+answer.stdout = "true false false false"
+context = "y={n1:2,n2:2} dominates x={n1:2,n2:1} because y >= x on every key and y > x on n2 — prints true. x does not dominate y (y is strictly greater on n2) — prints false. y vs z: z is greater on n2 (3>2) but y is greater on n1 (2>1), so neither dominates — prints false twice. The last two cases together identify y and z as concurrent: a system that needed to merge them would have to surface both as siblings rather than pick one."
+prompt.prompt = """
+Vector-clock dominance check. What does this program print?
+"""
+
+[[questions]]
+id = "be5f6a7b-8c9d-0e1f-2a3b-4c5d6e7f8a9b"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Eventual consistency is sufficient — by definition, the replicas will converge.",
+    "Switch to strong eventual consistency (SEC) using CRDTs and the conflicts disappear.",
+    "Implement vector clocks for conflict detection; bound staleness with a max anti-entropy interval; pre-define a conflict resolution policy (sibling storage, deterministic merge, or operator escalation).",
+]
+answer.answer = "Implement vector clocks for conflict detection; bound staleness with a max anti-entropy interval; pre-define a conflict resolution policy (sibling storage, deterministic merge, or operator escalation)."
+context = "The honest version of eventual consistency requires more than the phrase. You need a mechanism to detect concurrency (vector clocks), a bound on how long convergence may take (anti-entropy interval), and a documented resolution policy for the conflicts that the detection mechanism surfaces. 'Eventual consistency is sufficient' restates the problem rather than solving it. CRDTs are a real option but only work for a restricted set of operations and don't apply to arbitrary application state. The correct answer is the operational discipline that makes PA/EL safe."
+prompt.prompt = """
+After the Antarctic partition incident, the Constellation Operations team adds a postmortem action: 'Specify the catalog's consistency model precisely.' The catalog is a PA/EL store (accepts writes during partitions; optimizes for latency in normal operation). Which of the following is the right next step?
+"""

@@ -1,0 +1,102 @@
+[[questions]]
+id = "4d5e6f7a-8b9c-0d1e-2f3a-4b5c6d7e8f9a"
+type = "MultipleChoice"
+prompt.distractors = [
+    "SystemTime is more precise on Linux.",
+    "Instant is not serializable, which simplifies the code.",
+    "SystemTime is required for any operation involving the network.",
+]
+answer.answer = "SystemTime can jump backward when NTP adjusts the wall clock, which can make a timeout fire instantly or never; Instant is guaranteed monotonic."
+context = "The whole point of monotonic clocks is that they cannot move backward, which makes them safe for measuring elapsed time. SystemTime is synchronized to UTC by NTP, which means it can jump in either direction without warning. A timeout written with SystemTime can therefore behave wildly when synchronization adjusts. The other options misstate the API: SystemTime is not inherently more precise; serializability is not the question; SystemTime is not 'required' for network operations."
+prompt.prompt = """
+A code reviewer flags this snippet and recommends replacing `SystemTime` with `Instant`:
+
+```rust
+let start = SystemTime::now();
+loop {
+    if SystemTime::now().duration_since(start).unwrap() > Duration::from_secs(5) {
+        return Err(\"timeout\");
+    }
+    if poll_ready()? { return Ok(()); }
+}
+```
+
+What is the substantive reason for the change?
+"""
+
+[[questions]]
+id = "3c4d5e6f-7a8b-9c0d-1e2f-3a4b5c6d7e8f"
+type = "Tracing"
+prompt.program = """
+use std::cmp::max;
+
+struct LamportClock { counter: u64 }
+
+impl LamportClock {
+    fn new() -> Self { Self { counter: 0 } }
+    fn tick(&mut self) -> u64 {
+        self.counter += 1;
+        self.counter
+    }
+    fn observe(&mut self, incoming: u64) -> u64 {
+        self.counter = max(self.counter, incoming) + 1;
+        self.counter
+    }
+}
+
+fn main() {
+    let mut c = LamportClock::new();
+    print!(\"{} \", c.tick());
+    print!(\"{} \", c.observe(5));
+    print!(\"{} \", c.tick());
+    print!(\"{}\", c.observe(2));
+}
+"""
+answer.doesCompile = true
+answer.stdout = "1 6 7 8"
+context = "Step by step: tick from 0 -> 1, prints 1. observe(5): max(1,5)+1 = 6, prints 6. tick from 6 -> 7, prints 7. observe(2): max(7,2)+1 = 8, prints 8. The key insight is that observe() always advances past both the local and the incoming value — even when the incoming value (2) is less than the local value (7), the clock still increments past the local value."
+prompt.prompt = """
+A Lamport clock implementation. What does this program print?
+"""
+
+[[questions]]
+id = "2b3c4d5e-6f7a-8b9c-0d1e-2f3a4b5c6d7e"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Lamport clocks are simpler to implement than vector clocks.",
+    "Vector clocks consume O(n) space per timestamp where n is the number of nodes; Lamport clocks consume O(1).",
+    "Lamport clocks can be merged using just max; vector clocks require an element-wise merge.",
+]
+answer.answer = "Vector clocks can distinguish concurrent updates from causally-ordered ones; Lamport clocks always produce a total order, hiding concurrency."
+context = "The other choices are factually correct but miss what makes vector clocks operationally valuable for conflict resolution. The catalog needs to *detect* that two updates are concurrent so that the application (or operator) can resolve the conflict deliberately. A Lamport clock would silently total-order them and lose the information that the conflict existed. The space cost and merge complexity are real but secondary — the question is which clock can express the answer the system needs."
+prompt.prompt = """
+The MSS-17 incident in the lesson involves two concurrent attitude updates being silently merged. The fix is to use vector clocks instead of wall-clock timestamps for ordering catalog writes. Why specifically does a Lamport clock not also solve this problem?
+"""
+
+[[questions]]
+id = "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Increment the local node's slot in its vector clock before sending the message.",
+    "Compress vector clocks by removing slots that have not been updated recently.",
+    "Use a single global counter instead of per-node slots.",
+]
+answer.answer = "Take the element-wise max of the local and received vector clocks, then increment the local node's slot."
+context = "On receipt, the receiver must (1) merge in everything the sender had observed — element-wise max — and (2) record this receive as a new local event by incrementing its own slot. Skipping the max means the receiver loses track of what other nodes the sender had heard from. Incrementing before sending (option 1) is correct for the *send* path but wrong for *receive*. Compression and global counters change the algorithm in ways that defeat its purpose."
+prompt.prompt = """
+You are reviewing a vector clock implementation. On receipt of a message tagged with a remote vector clock, which operation must the receiver perform on its local vector clock?
+"""
+
+[[questions]]
+id = "0e1f2a3b-4c5d-6e7f-8a9b-0c1d2e3f4a5b"
+type = "MultipleChoice"
+prompt.distractors = [
+    "It works when L(a) < L(b) but is wrong in general.",
+    "It works because Lamport timestamps are unique across the cluster.",
+    "It works because the Lamport clock advances on every message receive.",
+]
+answer.answer = "It does not work: L(a) < L(b) does not imply that a causally happened-before b — they could be concurrent."
+context = "Lamport clocks guarantee one direction of the implication (a → b implies L(a) < L(b)), but not the other. Two concurrent events can have any ordering of timestamps. The code as written would report concurrent events as 'a happened first,' which is wrong. The correct way to detect concurrency requires vector clocks; Lamport timestamps alone cannot do it. The other options either invert the guarantee or appeal to facts (uniqueness, receive behavior) that don't establish the implication."
+prompt.prompt = """
+A colleague claims: 'We can detect causality with Lamport timestamps. If L(a) < L(b), then a happened-before b.' What is wrong with this claim?
+"""

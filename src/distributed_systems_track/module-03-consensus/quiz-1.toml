@@ -1,0 +1,96 @@
+[[questions]]
+id = "9a47b8c9-d0e1-f2a3-b4c5-d6e7f8a9b0c1"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Real networks have bounded message delivery, so FLP does not apply in practice.",
+    "Modern hardware is fast enough to make FLP irrelevant.",
+    "Production protocols use Byzantine fault tolerance, which sidesteps FLP.",
+]
+answer.answer = "Practical protocols preserve safety under arbitrary asynchrony and only require synchrony for liveness (progress); the partial-synchrony model is the formal way to express this."
+context = "FLP says deterministic consensus cannot *guarantee* termination under full asynchrony. Practical protocols (Raft, Paxos) preserve safety unconditionally (no wrong decisions) and require some periods of synchrony to make progress. The partial-synchrony model formalizes this. The other choices are wrong: real networks ARE asynchronous (FLP applies); hardware speed doesn't change the impossibility; BFT addresses a different problem (Byzantine failures), not FLP."
+prompt.prompt = """
+A reviewer asks: 'If FLP says deterministic consensus is impossible in an asynchronous system, how do Raft and Paxos work in production?' What is the substantive answer?
+"""
+
+[[questions]]
+id = "ab58c9d0-e1f2-a3b4-c5d6-e7f8a9b0c1d2"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Agreement",
+    "Validity",
+    "Integrity",
+]
+answer.answer = "Termination"
+context = "Termination is the liveness property: every non-failing node eventually decides. The other three (agreement, validity, integrity) are safety properties — they say 'nothing bad happens.' FLP shows termination cannot be guaranteed under full asynchrony; safety can. This is why production protocols preserve safety unconditionally and accept that liveness is conditional on network synchrony."
+prompt.prompt = """
+Which of the four formal properties of consensus is the one that FLP shows cannot be guaranteed in a fully asynchronous system?
+"""
+
+[[questions]]
+id = "bc69d0e1-f2a3-b4c5-d6e7-f8a9b0c1d2e3"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Eventually consistent updates (CRDTs or anti-entropy)",
+    "Single-leader replication with manual failover",
+    "Sharding by key with no cross-shard coordination",
+]
+answer.answer = "A consensus-based leader election service (etcd, ZooKeeper, or an embedded Raft library)"
+context = "Automatic leader election that survives node failures is one of the canonical use cases for consensus. The team needs the cluster to agree, automatically and durably, on which node is leader — this is consensus on a value ('the current leader'). CRDTs cannot decide a single leader; manual failover is exactly what they want to eliminate; sharding doesn't solve the cluster-wide agreement problem."
+prompt.prompt = """
+The Constellation Network team wants to automate catalog leader failover so it works at 3 AM on a weekend without human intervention. Which mechanism is the right tool?
+"""
+
+[[questions]]
+id = "cd7ae1f2-a3b4-c5d6-e7f8-a9b0c1d2e3f4"
+type = "Tracing"
+prompt.program = """
+use std::collections::HashMap;
+
+struct QuorumCheck {
+    nodes: Vec<String>,
+}
+
+impl QuorumCheck {
+    fn majority(&self) -> usize {
+        self.nodes.len() / 2 + 1
+    }
+    fn has_quorum(&self, responding: &[&str]) -> bool {
+        responding.len() >= self.majority()
+    }
+}
+
+fn main() {
+    let q = QuorumCheck {
+        nodes: vec![\"n1\".into(), \"n2\".into(), \"n3\".into()],
+    };
+    print!(\"{} \", q.majority());
+    print!(\"{} \", q.has_quorum(&[\"n1\"]));
+    print!(\"{} \", q.has_quorum(&[\"n1\", \"n2\"]));
+
+    let q5 = QuorumCheck {
+        nodes: vec![\"n1\".into(), \"n2\".into(), \"n3\".into(), \"n4\".into(), \"n5\".into()],
+    };
+    print!(\"{} \", q5.majority());
+    print!(\"{}\", q5.has_quorum(&[\"n1\", \"n2\"]));
+}
+"""
+answer.doesCompile = true
+answer.stdout = "2 false true 3 false"
+context = "Majority for 3 nodes is 2 (3/2 + 1 = 2). One node responding is not a quorum. Two responding is a quorum. Majority for 5 nodes is 3. Two of 5 is not a quorum (need 3). This is the standard quorum arithmetic for consensus protocols: any decision requires a majority, and any two majorities overlap on at least one node — which is what prevents two conflicting decisions from being made simultaneously."
+prompt.prompt = """
+A quorum check used by a consensus protocol. What does this program print?
+"""
+
+[[questions]]
+id = "de8bf2a3-b4c5-d6e7-f8a9-b0c1d2e3f4a5"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Two-phase commit (2PC) is safer than consensus and has no equivalent failure mode.",
+    "Two-phase commit operates on transactions; consensus operates on individual values.",
+    "Two-phase commit is faster than consensus and should be preferred for atomic commit.",
+]
+answer.answer = "Atomic commit and consensus are equivalent problems; any solution to one gives a solution to the other, and both share the FLP-style impossibility characteristics."
+context = "DDIA's deep observation is that atomic commit and consensus are equivalent. 2PC's blocking-on-coordinator-failure is not a 2PC quirk — it is the same impossibility as FLP. Production systems build 2PC on top of a consensus log (Spanner's 2PC on Paxos; CockroachDB on Raft). Saying 2PC and consensus are 'different problems' is wrong; they are the same problem in different presentations."
+prompt.prompt = """
+A team is debating whether to use two-phase commit (2PC) or a consensus protocol (Raft) to commit a transaction that touches three nodes. A reviewer says: 'They are different problems.' Why is the reviewer wrong?
+"""

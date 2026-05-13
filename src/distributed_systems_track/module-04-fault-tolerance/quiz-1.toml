@@ -1,0 +1,100 @@
+[[questions]]
+id = "89ad6e7f-8a9b-0c1d-2e3f-4a5b6c7d8e9f"
+type = "MultipleChoice"
+prompt.distractors = [
+    "A perfect failure detector is achievable with sufficiently low timeouts.",
+    "Phi accrual is a perfect failure detector when properly tuned.",
+    "Synchronous network assumptions allow building a perfect failure detector in practice.",
+]
+answer.answer = "Perfect failure detectors require synchronous network assumptions that real systems don't have; practical detectors are at best 'eventually perfect' — they may produce transient false positives or false negatives."
+context = "Chandra & Toueg's taxonomy distinguishes the theoretical perfect detector (suspects exactly the failed processes) from practical eventually-perfect detectors (eventually right, but may be wrong transiently). Real networks are not synchronous, so a truly perfect detector cannot exist. Phi accrual is adaptive but not perfect; lower timeouts increase false positives. The takeaway is operational: choose a detector whose failure modes are tolerable, not one that claims to never fail."
+prompt.prompt = """
+A teammate proposes: 'Let's just build a perfect failure detector by setting the timeout to be the worst-case network RTT.' Why doesn't this work?
+"""
+
+[[questions]]
+id = "9abe7f80-9bcd-1e2f-3a4b-5c6d7e8f9a0b"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Phi accrual is faster to compute than fixed-timeout heartbeats.",
+    "Phi accrual requires fewer heartbeats than fixed-timeout detection.",
+    "Phi accrual eliminates the need for hysteresis between declare and clear thresholds.",
+]
+answer.answer = "Phi accrual adapts to changing network conditions by fitting a distribution to recent inter-heartbeat times, so its threshold tracks the actual latency profile rather than being a fixed value."
+context = "The core benefit of phi accrual is adaptation. When the network shifts (a midday traffic spike, an Antarctic relay degradation), phi accrual recalibrates and produces appropriate suspicion levels for the new conditions. Fixed-timeout heartbeats would either false-positive (tuned for the better regime) or be slow (tuned for the worse regime). The other options are wrong: phi accrual is more expensive computationally, doesn't reduce heartbeat count, and still benefits from declare/clear hysteresis."
+prompt.prompt = """
+The catalog runs in a deployment where intra-region latency averages 5ms but cross-region paths average 150ms with high variance. The team is choosing between fixed-timeout heartbeats and phi accrual for service-to-service failure detection. What is the substantive reason to choose phi accrual?
+"""
+
+[[questions]]
+id = "abcf8091-acde-2f3a-4b5c-6d7e8f9a0b1c"
+type = "Tracing"
+prompt.program = """
+use std::collections::HashMap;
+
+#[derive(Debug, PartialEq)]
+enum Status { Alive, Suspected, Dead }
+
+struct Detector {
+    elapsed_ms: HashMap<&'static str, u64>,
+    suspect_ms: u64,
+    dead_ms: u64,
+}
+
+impl Detector {
+    fn classify(&self, node: &str) -> Status {
+        match self.elapsed_ms.get(node) {
+            None => Status::Dead,
+            Some(&e) if e < self.suspect_ms => Status::Alive,
+            Some(&e) if e < self.dead_ms => Status::Suspected,
+            _ => Status::Dead,
+        }
+    }
+}
+
+fn main() {
+    let d = Detector {
+        elapsed_ms: HashMap::from([(\"A\", 30u64), (\"B\", 80), (\"C\", 200)]),
+        suspect_ms: 75,
+        dead_ms: 150,
+    };
+    print!(\"{:?} \", d.classify(\"A\"));
+    print!(\"{:?} \", d.classify(\"B\"));
+    print!(\"{:?} \", d.classify(\"C\"));
+    print!(\"{:?}\", d.classify(\"Z\"));
+}
+"""
+answer.doesCompile = true
+answer.stdout = "Alive Suspected Dead Dead"
+context = "A=30ms < 75ms → Alive. B=80ms in (75,150) → Suspected. C=200ms >= 150ms → Dead. Z is not in the map → Dead (a never-seen node is treated as dead, which is the safe conservative default). The three-state model gives consumers a chance to react before declaration: at 'Suspected' the load balancer might stop sending new requests; at 'Dead' the failover triggers."
+prompt.prompt = """
+A three-state failure detector. What does this program print?
+"""
+
+[[questions]]
+id = "bcd09102-bcde-3a4b-5c6d-7e8f9a0b1c2d"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Increase the heartbeat interval to reduce false positives.",
+    "Decrease the dead timeout to detect failures faster.",
+    "Send heartbeats over a separate dedicated network.",
+]
+answer.answer = "Add hysteresis: require phi to drop substantially below the declare threshold before clearing the dead status."
+context = "Flapping (rapid alternation between alive and dead status) is the canonical signal of a missing hysteresis gap. The fix is to require sustained signal in either direction before changing state. Without hysteresis, a phi that hovers around the declare threshold will cross it repeatedly. Increasing the heartbeat interval doesn't help (false positives are about jitter, not heartbeat count). Decreasing the dead timeout makes flapping worse. A dedicated network may help underlying issues but doesn't address the declaration-mechanism problem."
+prompt.prompt = """
+A failure detector is producing 'flapping': it declares a node dead, the node is briefly silent (no heartbeats arrive), then heartbeats resume, the detector clears the status, the cycle repeats. What is the most direct mitigation?
+"""
+
+[[questions]]
+id = "cde1a213-cdef-4b5c-6d7e-8f9a0b1c2d3e"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Suspicion is faster to compute; declaration is slower.",
+    "Suspicion is for read traffic; declaration is for write traffic.",
+    "Suspicion is unique to phi accrual; fixed-timeout detectors only support declaration.",
+]
+answer.answer = "Suspicion is a continuous signal that consumers can react to with different sensitivities; declaration is a discrete decision that triggers expensive recovery actions."
+context = "The separation is about cost and granularity. A continuous suspicion signal can drive load-balancer weighting, circuit-breaker state, and routing decisions, each with its own threshold. Declaration — promoting a follower, ejecting a node, alerting an operator — is expensive and discrete. Conflating them forces all consumers to share the same threshold and produces flapping. The other options misstate the distinction."
+prompt.prompt = """
+Why does the lesson emphasize separating 'suspicion' (a probability) from 'declaration' (a decision to act)?
+"""

@@ -1,0 +1,102 @@
+[[questions]]
+id = "9c1d2e3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f"
+type = "MultipleChoice"
+prompt.distractors = [
+    "The remote node has definitely failed.",
+    "The request was definitely not received by the remote node.",
+    "The remote node has definitely received but not processed the request.",
+]
+answer.answer = "You stopped waiting; the actual state of the remote operation is unknown."
+context = "A timeout is a local decision to stop waiting. It does not imply anything about what the remote node observed or did. The request may have been lost, processed and acknowledged with a lost reply, processed and crashed, or still in progress. The other choices treat the timeout as if it carried information it cannot carry on an asynchronous network."
+prompt.prompt = """
+The Pacific ground station's `fetch_telemetry()` call to `relay.meridian.internal:7400` returns `Err(\"request timed out\")` after the 5-second timeout fires. Which of the following can the caller correctly conclude?
+"""
+
+[[questions]]
+id = "8b2c3d4e-5a6b-7c8d-9e0f-1a2b3c4d5e6f"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Idempotency is only required when running with exactly-once delivery semantics.",
+    "Idempotency is a performance optimization that reduces the cost of retries.",
+    "Idempotency is only needed for read operations; writes are safe to retry by default.",
+]
+answer.answer = "The network can deliver any given message zero, one, or many times, so the receiver must be safe under arbitrary duplication."
+context = "On an asynchronous packet network, message duplication is unavoidable in the presence of retries — and retries are unavoidable in the presence of timeouts. Idempotency is what makes at-least-once delivery (the only realistically achievable guarantee) operationally safe. The other choices invert the cause (exactly-once needs idempotency, not the other way around) or get the workload backwards (writes are exactly the case that breaks under duplication)."
+prompt.prompt = """
+Why is idempotency described in the lesson as 'non-negotiable' in distributed systems?
+"""
+
+[[questions]]
+id = "7a3b4c5d-6a7b-8c9d-0e1f-2a3b4c5d6e7f"
+type = "Tracing"
+prompt.program = """
+use std::collections::HashSet;
+use std::sync::Mutex;
+
+struct Receiver {
+    seen: Mutex<HashSet<u64>>,
+}
+
+impl Receiver {
+    fn handle(&self, command_id: u64) -> &'static str {
+        let mut seen = self.seen.lock().unwrap();
+        if seen.contains(&command_id) {
+            "duplicate"
+        } else {
+            seen.insert(command_id);
+            "applied"
+        }
+    }
+}
+
+fn main() {
+    let r = Receiver { seen: Mutex::new(HashSet::new()) };
+    print!("{} ", r.handle(42));
+    print!("{} ", r.handle(43));
+    print!("{} ", r.handle(42));
+    print!("{}", r.handle(44));
+}
+"""
+answer.doesCompile = true
+answer.stdout = "applied applied duplicate applied"
+context = "The receiver records every command_id it has seen. The first occurrence of 42 returns 'applied' and the ID is inserted. The first 43 likewise applies. The second 42 is now a duplicate (the set contains it). 44 is new. This is the canonical idempotency pattern: the receiver detects repeats locally, making at-least-once delivery safe."
+prompt.prompt = """
+The program below implements the idempotency pattern described in the lesson: each command carries a unique ID, and the receiver tracks which IDs have already been applied. What does this program print?
+"""
+
+[[questions]]
+id = "6f4a5b6c-7d8e-9f0a-1b2c-3d4e5f6a7b8c"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Timeouts longer than 5 seconds are always too long for satellite networks.",
+    "The deeper problem is that timeouts cannot distinguish lost replies from slow processing.",
+    "The deeper problem is that the firmware should fail closed and refuse retries when uncertain.",
+]
+answer.answer = "Without a deduplication mechanism, retrying the original command after a timeout duplicates a non-idempotent physical action."
+context = "A duplicated 3-second burn is a duplicated 3-second burn — that's a real-world action the network's at-least-once semantics cannot undo. The fix is not 'tune the timeout' (option 1) — the operation could time out for many reasons; nor 'distinguish failure modes' (option 2) — that's impossible on an async network; nor 'fail closed' (option 3) — that strands the spacecraft. The fix is to make the command idempotent with a unique ID."
+prompt.prompt = """
+A Meridian engineer reports an incident: a thruster command 'burn for 3 seconds' was sent to satellite MSS-23. The client timed out at 5 seconds and retried. The burn actually executed twice, putting the satellite in the wrong orbit. The post-mortem author writes: 'Root cause: client timeout was too short. Recommend increasing to 30s.' What is the deeper problem this analysis misses?
+"""
+
+[[questions]]
+id = "5e6f7a8b-9c0d-1e2f-3a4b-5c6d7e8f9a0b"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Fallacy 4: The network is secure",
+    "Fallacy 6: There is one administrator",
+    "Fallacy 8: The network is homogeneous",
+]
+answer.answer = "Fallacy 2: Latency is zero"
+context = "Issuing N sequential round trips when one batched call would suffice is the canonical 'latency is zero' bug. The code pays the full network RTT 48 times instead of once, and on a satellite network that RTT is substantial. The security, administration, and homogeneity fallacies are not what makes this code slow — the latency fallacy is."
+prompt.prompt = """
+A code review flags this snippet:
+
+```rust
+for satellite_id in 0..48 {
+    let status = relay_client.get_status(satellite_id).await?;
+    aggregator.record(satellite_id, status);
+}
+```
+
+Which of the eight fallacies of distributed computing is this code most clearly violating?
+"""

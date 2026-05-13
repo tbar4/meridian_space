@@ -1,0 +1,110 @@
+[[questions]]
+id = "4bf2a3b4-c5d6-e7f8-a9b0-c1d2e3f4a5b6"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Monotonic reads.",
+    "Consistent prefix reads.",
+    "Bounded staleness.",
+]
+answer.answer = "Read-after-write (read-your-writes)."
+context = "The writer submitted a write and on the immediate next read did not see it. This is the textbook read-after-write anomaly. Monotonic reads would be 'I saw state X and then later saw older state W.' Consistent prefix reads would be 'I saw effect before cause.' Bounded staleness is a property of the system, not a class of user-observable anomaly. The fix is to pin the writer's reads to the leader for a window or to use an LSN token."
+prompt.prompt = """
+A ground station operator reports: 'I submitted a TLE update for MSS-19. Immediately afterward, my dashboard refresh showed the OLD TLE. Thirty seconds later it showed the new one.' Which replication-lag anomaly does this describe?
+"""
+
+[[questions]]
+id = "5c03b4c5-d6e7-f8a9-b0c1-d2e3f4a5b6c7"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Pin the operator's session to a single follower for the duration of the session.",
+    "Route all reads to the leader.",
+    "Increase the replication factor.",
+]
+answer.answer = "Route the operator's reads to a replica whose LSN is at least as recent as the session's last observed LSN, falling back to the leader if no replica is caught up."
+context = "Monotonic reads requires that within a session, reads never regress. The LSN-token approach achieves this without pinning to a single replica (which limits load distribution) and without forcing all reads to the leader (which costs leader load). 'Pin to single follower' also works but reduces flexibility. 'Route all reads to leader' is correct but excessive. 'Increase replication factor' doesn't address the per-replica lag variance."
+prompt.prompt = """
+An operator sees the catalog dashboard show satellite MSS-23 as 'active,' then refresh and show it as 'pending,' then refresh again and show 'active.' Replication lag varies across followers. Which mitigation gives the operator monotonic reads with the least leader load impact?
+"""
+
+[[questions]]
+id = "6d14c5d6-e7f8-a9b0-c1d2-e3f4a5b6c7d8"
+type = "Tracing"
+prompt.program = """
+struct Lsn(u64);
+
+struct Replica { current_lsn: u64 }
+
+struct Router {
+    replicas: Vec<Replica>,
+    session_lsn: u64,
+}
+
+impl Router {
+    fn pick(&self) -> i32 {
+        let mut best: i32 = -1;
+        let mut best_lsn = 0u64;
+        for (i, r) in self.replicas.iter().enumerate() {
+            if r.current_lsn >= self.session_lsn && r.current_lsn > best_lsn {
+                best = i as i32;
+                best_lsn = r.current_lsn;
+            }
+        }
+        best
+    }
+}
+
+fn main() {
+    let r = Router {
+        replicas: vec![
+            Replica { current_lsn: 100 },
+            Replica { current_lsn: 95 },
+            Replica { current_lsn: 105 },
+        ],
+        session_lsn: 102,
+    };
+    print!(\"{} \", r.pick());
+
+    let r2 = Router {
+        replicas: vec![
+            Replica { current_lsn: 100 },
+            Replica { current_lsn: 95 },
+        ],
+        session_lsn: 110,
+    };
+    print!(\"{}\", r2.pick());
+}
+"""
+answer.doesCompile = true
+answer.stdout = "2 -1"
+context = "First router: session needs LSN >= 102. Replicas have 100, 95, 105. Only the third (index 2) qualifies — it has 105 which is >= 102. Prints 2. Second router: session needs >= 110, but both replicas have 100 and 95 — neither qualifies. The function returns -1 to signal 'no replica is caught up; fall back to leader.' The pattern reflects production routers: when no follower is fresh enough, route to the leader rather than serve stale data."
+prompt.prompt = """
+An LSN-token read router. What does this program print?
+"""
+
+[[questions]]
+id = "7e25d6e7-f8a9-b0c1-d2e3-f4a5b6c7d8e9"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Eventual consistency.",
+    "Read-your-writes consistency.",
+    "Linearizability.",
+]
+answer.answer = "Consistent prefix reads."
+context = "The conjunction-prediction service is depending on a causal order: orbital state must precede telemetry that references it, and downstream readers must observe the prerequisite before the dependent record. This is the consistent-prefix-reads guarantee. The other choices are weaker (eventual), focused on the writer's view (read-your-writes), or much stronger than needed (linearizability)."
+prompt.prompt = """
+The conjunction-prediction service reads orbital state and the corresponding telemetry stream from different shards. The team observes occasional cases where it reads telemetry referencing an orbital state version that the state shard has not yet shown. Which session guarantee specifically addresses this?
+"""
+
+[[questions]]
+id = "8f36e7f8-a9b0-c1d2-e3f4-a5b6c7d8e9f0"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Replication lag has reduced to zero.",
+    "All followers can now safely serve reads with linearizability.",
+    "The system's read throughput will increase proportionally to the number of followers.",
+]
+answer.answer = "If no follower is within the 1-second bound, those reads must be served from the leader or rejected — the staleness bound is enforced by removing stale replicas from the pool."
+context = "Bounded staleness is operationally enforced by removing replicas that exceed the bound. If all replicas exceed it, the read pool is empty and reads must either go to the leader or fail. This makes lag a discrete event (pool size shrinks, alert fires) rather than a silent staleness. It does not eliminate lag, does not provide linearizability (replicas can still be up to the bound stale), and does not necessarily increase throughput — it may decrease it during lag events."
+prompt.prompt = """
+The catalog team adds bounded-staleness enforcement: any follower more than 1 second behind the leader is removed from the read pool. After deploying this, which property is now guaranteed?
+"""

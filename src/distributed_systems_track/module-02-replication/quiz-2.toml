@@ -1,0 +1,102 @@
+[[questions]]
+id = "f6a7b8c9-d0e1-f2a3-b4c5-d6e7f8a9b0c1"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Use last-write-wins with NTP-synchronized timestamps.",
+    "Block writes during partitions until the cross-region link recovers.",
+    "Promote one region as the global leader and route all writes through it.",
+]
+answer.answer = "Partition the data by region — each region owns writes for its assigned objects — and rely on cross-region replication only for read availability."
+context = "Conflict avoidance via data partitioning is the cleanest strategy: if each region owns its own data, there are no concurrent writes to the same key across regions. LWW with NTP timestamps is the silently-lossy pattern from Module 1 (the MSS-17 incident). Blocking writes during partitions defeats the purpose of multi-leader. Routing everything through one global leader reverts to single-leader, losing the local-latency benefit that motivated multi-leader in the first place."
+prompt.prompt = """
+The catalog accepts writes at twelve ground stations across regions. The team wants multi-leader replication for local-latency writes and partition tolerance, but they want to minimize the conflict-resolution surface. Which strategy best matches the goal?
+"""
+
+[[questions]]
+id = "07b8c9d0-e1f2-a3b4-c5d6-e7f8a9b0c1d2"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Strong consistency for all reads regardless of partitions.",
+    "Linearizability when at least one replica is reachable.",
+    "Bounded staleness with a fixed staleness window.",
+]
+answer.answer = "Quorum-style consistency: any read overlaps with the latest acknowledged write by at least one replica, so the reader can detect and prefer the newer value via vector-clock or timestamp comparison."
+context = "W + R > N is the Dynamo quorum overlap condition. It guarantees that the read replica set and the write replica set share at least one replica, which holds the latest value. The reader detects which value is newest by comparing version metadata. This is not linearizability (concurrent writes can still produce siblings), not strong consistency in all senses, and not a bounded-staleness model — it is the specific quorum-overlap property that Dynamo-style systems provide."
+prompt.prompt = """
+A Dynamo-style leaderless store is configured with N=5 (replicas per key), W=3 (acks required to consider a write successful), and R=3 (responses required for a read). What property does W + R > N specifically guarantee?
+"""
+
+[[questions]]
+id = "18c9d0e1-f2a3-b4c5-d6e7-f8a9b0c1d2e3"
+type = "Tracing"
+prompt.program = """
+use std::collections::HashSet;
+
+#[derive(Default, Clone)]
+struct GSet {
+    items: HashSet<u32>,
+}
+
+impl GSet {
+    fn add(&mut self, x: u32) { self.items.insert(x); }
+    fn merge(&mut self, other: &GSet) {
+        for x in &other.items { self.items.insert(*x); }
+    }
+    fn size(&self) -> usize { self.items.len() }
+}
+
+fn main() {
+    let mut a = GSet::default();
+    a.add(1); a.add(2); a.add(3);
+    let mut b = GSet::default();
+    b.add(3); b.add(4); b.add(5);
+    let mut c = GSet::default();
+    c.add(5); c.add(6);
+
+    // Merge order: a <- b <- c
+    let mut left = a.clone();
+    left.merge(&b);
+    left.merge(&c);
+    print!(\"{} \", left.size());
+
+    // Merge order: c <- a <- b
+    let mut right = c.clone();
+    right.merge(&a);
+    right.merge(&b);
+    print!(\"{}\", right.size());
+}
+"""
+answer.doesCompile = true
+answer.stdout = "6 6"
+context = "G-Sets are CRDTs: merge is set union, which is commutative and associative. The merged set is {1,2,3,4,5,6} regardless of the order in which the three sets are unioned. Both prints output 6. This is the defining property of a CRDT — merge order does not affect the result, which is why CRDTs can be safely replicated and merged without coordination."
+prompt.prompt = """
+A G-Set CRDT replicated across three nodes. What does this program print?
+"""
+
+[[questions]]
+id = "29d0e1f2-a3b4-c5d6-e7f8-a9b0c1d2e3f4"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Sloppy quorum violates linearizability and should be disabled in any production deployment.",
+    "Sloppy quorum is a property of all leaderless systems and cannot be configured.",
+    "Sloppy quorum makes writes more durable by replicating to more nodes.",
+]
+answer.answer = "Sloppy quorum trades the guarantee that writes are on the 'right' replicas for availability during partial outages; on recovery, hinted handoff moves the writes back to the canonical replicas."
+context = "Sloppy quorum is the design choice in Dynamo and Cassandra to accept writes from any reachable node when the canonical replicas are unreachable. It trades the durability guarantee (writes may sit on non-canonical replicas) for write availability. Hinted handoff is the mechanism that eventually moves these writes to the correct replicas. It is NOT inherently a linearizability violation (leaderless systems are not linearizable to begin with); it IS configurable (Cassandra allows disabling it); and it does NOT increase durability — it preserves availability at the cost of durability."
+prompt.prompt = """
+A leaderless system is described as using a 'sloppy quorum.' Which characterization is most accurate?
+"""
+
+[[questions]]
+id = "3ae1f2a3-b4c5-d6e7-f8a9-b0c1d2e3f4a5"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Multi-leader replication — the catalog already uses it.",
+    "Last-write-wins with vector clocks.",
+    "Single-leader replication with the leader in the Frankfurt datacenter.",
+]
+answer.answer = "Single-leader replication, with the leader chosen per-key by region (data partitioning), so each tracking region owns its own objects."
+context = "The data has a natural partition (each region tracks specific objects), no cross-region concurrent writes are expected, and the operations team wants minimal conflict-resolution surface. This is the conflict-avoidance pattern: keep multi-leader's regional locality but partition by data so each piece of data effectively has a single leader. A global single leader in one datacenter loses the local-latency benefit. Multi-leader exists already but the team wants less complexity. LWW with vector clocks is still surfacing siblings — the team wants no siblings."
+prompt.prompt = """
+A team is designing a registry for spacecraft assets where each spacecraft is tracked by exactly one regional operations center, and updates are submitted only from that center. They want low write latency, partition tolerance, and zero conflict-resolution code. Which replication model fits?
+"""

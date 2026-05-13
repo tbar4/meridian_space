@@ -1,0 +1,93 @@
+[[questions]]
+id = "34e1d8a9-b0c1-d2e3-f4a5-b6c7d8e9f0a1"
+type = "MultipleChoice"
+prompt.distractors = [
+    "All node additions must be approved by the previous leader.",
+    "Snapshots must be taken before any membership change.",
+    "Configuration changes must be performed during a planned maintenance window.",
+]
+answer.answer = "Membership changes must transit through a state where both the old and new configurations must agree on every decision (joint consensus), or change one node at a time (single-server change)."
+context = "The safety failure in naive membership change is that two disjoint majorities can form during the transition. Joint consensus prevents this by requiring overlap with both old and new configurations during the transition. Single-server changes prevent it by restricting changes to one node at a time, which guarantees that any new-config majority overlaps with any old-config majority. The other options are unrelated to the safety problem."
+prompt.prompt = """
+A naive Raft membership change — committing a new configuration as an ordinary log entry — has a safety failure where two disjoint majorities can each elect a leader and commit different entries. What is the structural requirement that fixes this?
+"""
+
+[[questions]]
+id = "45f2e9b0-c1d2-e3f4-a5b6-c7d8e9f0a1b2"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Permanent stall: no majority exists on either side, so the cluster cannot make progress.",
+    "Both sides will continue operating with their respective leaders.",
+    "The original leader will retain authority on both sides because it has the highest term.",
+]
+answer.answer = "The side with 3 nodes will continue operating; the side with 2 nodes will be unable to commit until the partition heals."
+context = "5 nodes, majority is 3. The partition splits into 3 and 2. The 3-node side has a majority and continues. The 2-node side has no majority and cannot commit. This is the canonical Raft partition behavior. 'Permanent stall' would be true if the cluster were 4 nodes split 2-2; 'both sides operating' would violate safety; 'original leader retains authority on both sides' would require communication across the partition, which is exactly what's broken."
+prompt.prompt = """
+A 5-node Raft cluster is partitioned into a side with 3 nodes and a side with 2 nodes. What happens?
+"""
+
+[[questions]]
+id = "5603fac1-d2e3-f4a5-b6c7-d8e9f0a1b2c3"
+type = "Tracing"
+prompt.program = """
+struct Cluster {
+    nodes: Vec<&'static str>,
+}
+
+impl Cluster {
+    fn majority(&self) -> usize {
+        self.nodes.len() / 2 + 1
+    }
+    fn can_make_progress(&self, alive: &[&str]) -> bool {
+        let alive_count = self.nodes.iter().filter(|n| alive.contains(n)).count();
+        alive_count >= self.majority()
+    }
+}
+
+fn main() {
+    let three = Cluster { nodes: vec![\"A\", \"B\", \"C\"] };
+    print!(\"{} \", three.can_make_progress(&[\"A\", \"B\"]));
+    print!(\"{} \", three.can_make_progress(&[\"A\"]));
+
+    let five = Cluster { nodes: vec![\"A\", \"B\", \"C\", \"D\", \"E\"] };
+    print!(\"{} \", five.can_make_progress(&[\"A\", \"B\", \"C\"]));
+    print!(\"{} \", five.can_make_progress(&[\"A\", \"B\"]));
+
+    let four = Cluster { nodes: vec![\"A\", \"B\", \"C\", \"D\"] };
+    print!(\"{}\", four.can_make_progress(&[\"A\", \"B\"]));
+}
+"""
+answer.doesCompile = true
+answer.stdout = "true false true false false"
+context = "3-node: majority is 2. 2 alive: can progress (true). 1 alive: cannot (false). 5-node: majority is 3. 3 alive: can progress (true). 2 alive: cannot (false). 4-node: majority is 3 (4/2 + 1 = 3). 2 alive: cannot (false). The 4-node case shows why even-numbered clusters are problematic: a 2-2 split leaves neither side with a majority. Odd-numbered clusters maximize fault tolerance for a given cluster size."
+prompt.prompt = """
+A cluster's progress-checking function under various failure scenarios. What does this program print?
+"""
+
+[[questions]]
+id = "6714ebd2-e3f4-a5b6-c7d8-e9f0a1b2c3d4"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Lease reads require Byzantine fault tolerance.",
+    "Lease reads cost a round-trip per read, while read-index reads are local.",
+    "Lease reads work only on leaderless systems.",
+]
+answer.answer = "Lease reads rely on the assumption that clock skew between leader and followers is bounded; if clocks can drift unboundedly, a deposed leader could continue serving stale reads inside an expired lease."
+context = "The lease-read mechanism's correctness depends on the leader knowing that no follower will start an election before the lease expires. This requires bounded clock skew — the leader's clock and the followers' clocks must agree on 'how long has it been since the last heartbeat' within some tolerance. Module 1's lesson on clock unreliability is exactly why this is a concern. Read-index reads do not have this dependency because they explicitly confirm leadership via a heartbeat round. The cost tradeoff is reversed in option 2: lease reads are local; read-index reads cost a round-trip."
+prompt.prompt = """
+The catalog team is choosing between read-index (heartbeat-confirmed local read) and lease-read (local read within a lease window) for linearizable reads. Which is the substantive correctness concern about lease reads?
+"""
+
+[[questions]]
+id = "7825fce3-f4a5-b6c7-d8e9-f0a1b2c3d4e5"
+type = "MultipleChoice"
+prompt.distractors = [
+    "The cluster is unable to elect a leader.",
+    "The leader is replicating entries but not committing them.",
+    "Followers are out of disk space.",
+]
+answer.answer = "The leader's log has been compacted past the index the follower needs to receive, so the leader must send a full state-machine snapshot rather than incremental log entries."
+context = "InstallSnapshot RPCs are triggered when a follower is so far behind that the leader has already compacted the log entries the follower needs. This happens when (a) a follower has been offline for an extended period, (b) a new follower has just joined the cluster, or (c) the snapshot interval is too aggressive relative to the follower's catch-up rate. The fix is usually to investigate the lagging follower, not the leader. The other options describe different failure modes."
+prompt.prompt = """
+A Raft cluster's metrics show repeated InstallSnapshot RPCs being sent to one follower. What is the most likely cause?
+"""

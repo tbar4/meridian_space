@@ -1,0 +1,101 @@
+[[questions]]
+id = "def2b324-dabc-5c6d-7e8f-9a0b1c2d3e4f"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Decrease the timeout on calls to the conjunction-prediction service.",
+    "Increase the size of the global connection pool.",
+    "Add retries to recover from transient prediction service errors.",
+]
+answer.answer = "Add per-dependency bulkheads so that calls to the prediction service use a separate pool from calls to other services."
+context = "The root cause is resource coupling: the global pool exhausted by one slow downstream starves other healthy ones. Per-dependency bulkheads (separate thread or connection pools per downstream) partition the resource budget so exhaustion of one pool does not affect others. Decreasing the timeout reduces the per-call hold time but doesn't fix the coupling. Increasing the global pool postpones the problem. Adding retries makes it worse — more requests, more held resources."
+prompt.prompt = """
+The September incident: a slow downstream (conjunction-prediction) exhausted the connection pool used for all cross-service calls, causing healthy dependencies to also fail. What is the structural fix?
+"""
+
+[[questions]]
+id = "ef03c435-eabc-6d7e-8f9a-0b1c2d3e4f50"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Closed → Open",
+    "Open → Closed (with no intermediate state)",
+    "Half-Open → Open (without the failure-then-trip sequence)",
+]
+answer.answer = "Half-Open → Closed"
+context = "The Half-Open state is the recovery probe state. From Half-Open: if probe calls succeed, the breaker closes (recovery succeeded); if a probe fails, the breaker opens again (with timeout restarted). The transition 'Half-Open → Closed' is the success path of the recovery test. The Closed → Open transition happens on failure threshold exceeded. Open → Closed without Half-Open would skip the recovery probe, which is unsafe. Half-Open → Open requires a failure event, not the absence of one."
+prompt.prompt = """
+In a three-state circuit breaker (Closed, Open, Half-Open), which transition describes a successful recovery test?
+"""
+
+[[questions]]
+id = "f014d546-fabc-7e8f-9a0b-1c2d3e4f5061"
+type = "Tracing"
+prompt.program = """
+struct Breaker {
+    failures: u32,
+    threshold: u32,
+    open: bool,
+}
+
+impl Breaker {
+    fn new(threshold: u32) -> Self {
+        Self { failures: 0, threshold, open: false }
+    }
+    fn allow(&self) -> bool { !self.open }
+    fn note(&mut self, success: bool) {
+        if success {
+            self.failures = 0;
+        } else {
+            self.failures += 1;
+            if self.failures >= self.threshold {
+                self.open = true;
+            }
+        }
+    }
+}
+
+fn main() {
+    let mut b = Breaker::new(3);
+    print!(\"{} \", b.allow());
+    b.note(false);
+    b.note(false);
+    print!(\"{} \", b.allow());
+    b.note(false);
+    print!(\"{} \", b.allow());
+    b.note(true);
+    print!(\"{}\", b.allow());
+}
+"""
+answer.doesCompile = true
+answer.stdout = "true true false false"
+context = "Initial: closed, allows (true). After 2 failures (still below threshold of 3): still closed, allows (true). After 3rd failure: failures==threshold, breaker opens, does NOT allow (false). After a success(true): the implementation does NOT close the breaker — note(true) just resets the failure counter but doesn't change `open`. So allow() still returns false. This shows a real subtlety: a circuit breaker that opens on failure threshold doesn't automatically close on success; production breakers require the Half-Open probe path to validate recovery before closing."
+prompt.prompt = """
+A simplified circuit breaker. What does this program print? (Note: this implementation does NOT have a Half-Open state.)
+"""
+
+[[questions]]
+id = "0125e657-0abc-8f9a-0b1c-2d3e4f506172"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Exponential backoff with no jitter.",
+    "Retries with a fixed 10ms delay between attempts.",
+    "Unlimited retries with exponential backoff.",
+]
+answer.answer = "Exponential backoff with jitter, plus a retry budget limiting total retry volume to a percentage of base traffic."
+context = "The retry-storm failure mode requires both mitigations: backoff (so retries don't immediately re-hit the downstream) AND jitter (so simultaneous callers don't form synchronized waves) AND budget (so retries don't multiply load unboundedly). Backoff without jitter still synchronizes waves. Fixed delays are worse than no retries. Unlimited retries with backoff still produce a retry storm given enough callers. The complete picture is backoff + jitter + budget."
+prompt.prompt = """
+A team observes that during downstream failures, their retry traffic exceeds normal traffic by 4×, prolonging the downstream's degradation. Which retry policy combination prevents this 'retry amplification'?
+"""
+
+[[questions]]
+id = "1236f768-1abc-9a0b-1c2d-3e4f50617283"
+type = "MultipleChoice"
+prompt.distractors = [
+    "It increases the apparent latency of all downstream calls.",
+    "It conflicts with circuit-breaker state machines.",
+    "It requires specialized hardware support.",
+]
+answer.answer = "Without deadline propagation, deep call chains do work that the upstream has already abandoned, wasting downstream resources on requests no one is waiting for."
+context = "Deadline propagation is the discipline of forwarding the time remaining (deadline minus elapsed) to each downstream call, rather than using a fresh timeout. Without it, an upstream that times out at 5 seconds may have called a downstream that won't time out for 30 seconds — the downstream continues processing the request long after the upstream has given up. This wastes downstream resources, holds connections, and amplifies the resource-coupling problem. The other options misstate the consequence."
+prompt.prompt = """
+The lesson recommends 'deadline propagation' — forwarding the time remaining to downstream calls. Why is this important?
+"""

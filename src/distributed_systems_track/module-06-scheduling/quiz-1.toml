@@ -1,0 +1,112 @@
+[[questions]]
+id = "67bababc-6abc-ff60-2738-495061728394"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Priority inversion",
+    "Convoy effect",
+    "Thundering herd"
+]
+answer.answer = "Starvation"
+context = "Starvation is the failure mode where some class of jobs (in this case, low-priority batch reconciliation) never runs because higher-priority jobs continuously preempt them. The fix is priority aging: a job's effective priority increases the longer it waits, so eventually even very-low-priority jobs become competitive with high-priority ones. Priority inversion is when a high-priority job is blocked by a low-priority job holding a resource. Convoy effect is when long jobs block short jobs. Thundering herd is mass-simultaneous job release."
+prompt.prompt = """
+The catalog's reconciliation pipeline (P2) hasn't run a job in three hours because P0 conjunction alerts and P1 pass-window jobs have been continuous. Which scheduler failure mode is this, and what is the canonical fix?
+"""
+
+[[questions]]
+id = "78cbcbcd-7abc-0071-3849-506172839405"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Earliest Deadline First (EDF) alone, since deadlines convey priority implicitly.",
+    "FIFO, since arrival order should determine processing order.",
+    "Round-robin, to ensure fair processing across alert types."
+]
+answer.answer = "Priority classes (with conjunction alerts at the highest class) combined with EDF within each class."
+context = "The mixed-criticality requirement (different priority classes plus deadlines) is exactly what priority+EDF was designed for. EDF alone treats all jobs equally except by deadline — a P2 job with an early deadline could preempt a P0 job with a later one, which is wrong for safety-critical workloads. FIFO ignores both priority and deadlines. Round-robin is a fairness algorithm, not appropriate for deadline-aware work. The two-level structure (priority across classes, EDF within) is the standard for systems like the catalog's pass-window scheduler."
+prompt.prompt = """
+The pass-window scheduler handles three job classes: conjunction alerts (P0, must complete within 30s of submission), pass-window jobs (P1, deadline = next pass start), and routine telemetry (P2, deadline = end of day). Which scheduling discipline is correct?
+"""
+
+[[questions]]
+id = "89dcdcde-8abc-1182-4950-617283940516"
+type = "Tracing"
+prompt.program = """
+use std::collections::{BTreeMap, HashMap};
+
+struct FairShare {
+    weights: BTreeMap<&'static str, f64>,
+    consumed: BTreeMap<&'static str, f64>,
+}
+
+impl FairShare {
+    fn new() -> Self {
+        Self {
+            weights: BTreeMap::new(),
+            consumed: BTreeMap::new(),
+        }
+    }
+    fn add(&mut self, t: &'static str, w: f64) {
+        self.weights.insert(t, w);
+        self.consumed.insert(t, 0.0);
+    }
+    fn pick(&mut self) -> &'static str {
+        let pick = self.consumed.iter()
+            .min_by(|(t1, c1), (t2, c2)| {
+                let r1 = **c1 / self.weights[*t1];
+                let r2 = **c2 / self.weights[*t2];
+                r1.partial_cmp(&r2).unwrap()
+            })
+            .map(|(t, _)| *t)
+            .unwrap();
+        *self.consumed.get_mut(pick).unwrap() += 1.0;
+        pick
+    }
+}
+
+fn main() {
+    let mut s = FairShare::new();
+    s.add(\"A\", 3.0);
+    s.add(\"B\", 1.0);
+
+    let mut counts: HashMap<&str, i32> = HashMap::new();
+    for _ in 0..8 {
+        let p = s.pick();
+        *counts.entry(p).or_insert(0) += 1;
+    }
+    print!(\"{} \", counts.get(\"A\").copied().unwrap_or(0));
+    print!(\"{}\", counts.get(\"B\").copied().unwrap_or(0));
+}
+"""
+answer.doesCompile = true
+answer.stdout = "6 2"
+context = "Weighted fair-share with weight A=3, B=1. The pick algorithm chooses the tenant with the smallest consumed/weight ratio. After 8 picks, A is picked roughly 3/4 of the time and B roughly 1/4 — matching the weight ratio. Specifically: A picks 6 times (ratio 6/3=2.0), B picks 2 times (ratio 2/1=2.0). The ratios stay balanced, which is the defining property of fair-share scheduling under contention."
+prompt.prompt = """
+A weighted fair-share scheduler with two tenants. What does this program print?
+"""
+
+[[questions]]
+id = "9aedeed0-9abc-2293-5061-728394051627"
+type = "MultipleChoice"
+prompt.distractors = [
+    "EDF is unable to schedule jobs with priority classes.",
+    "EDF requires explicit job durations to compute schedules.",
+    "EDF performs worse than FIFO under any failure mode."
+]
+answer.answer = "EDF tries to meet every deadline equally; under overload it produces cascading deadline misses rather than gracefully degrading."
+context = "EDF is optimal under feasible load but degrades poorly under overload. Without admission control, when more work arrives than can be completed, EDF doesn't prioritize which deadlines to skip — it tries to meet all of them and misses most. The fix is admission control: reject jobs at submission time if the system cannot meet their deadlines. The other options misstate EDF: it CAN be combined with priority classes (and the lesson recommends exactly this); EDF doesn't need durations (it just orders by deadline); EDF doesn't perform worse than FIFO in general, only under specific overload conditions."
+prompt.prompt = """
+Why does the lesson say EDF 'degrades badly under overload'?
+"""
+
+[[questions]]
+id = "abf0f0e1-aabc-33a4-6172-839405162738"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Building one universal scheduler is always more efficient.",
+    "Workload-specific schedulers cannot share machines.",
+    "Multiple schedulers always need a global coordinator."
+]
+answer.answer = "Workload-specific schedulers are simpler to reason about and tune than one universal scheduler trying to handle all workloads, even at the cost of some inefficiency at boundaries between scheduler domains."
+context = "The argument is operational comprehensibility. A unified scheduler with priority classes, deadlines, fair-share, and bin-packing for multiple workload shapes is hard to tune, hard to debug, and rarely optimal for any individual workload. Three separate schedulers — one each for conjunction alerts, pass-window jobs, and reconciliation — are each simple to operate. The cost is some inefficiency at the boundaries (e.g., reserved capacity for one workload can't be used by another). The other options are wrong: universal schedulers are not always more efficient; partitioned scheduling doesn't preclude sharing machines (it just means each machine is committed to one scheduler at a time); coordinators are an option but not a requirement."
+prompt.prompt = """
+The lesson argues for partitioning workloads across multiple schedulers (pass-window, alerts, reconciliation) rather than one universal scheduler. What is the substantive reason?
+"""

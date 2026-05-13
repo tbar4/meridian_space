@@ -1,0 +1,93 @@
+[[questions]]
+id = "12655797-1abc-aa1b-7283-940516273849"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Gossip provides stronger consistency than consensus.",
+    "Gossip uses less memory per node than a central registry.",
+    "Gossip is faster than consensus for any cluster size."
+]
+answer.answer = "Gossip's O(log N) propagation time and lack of a central bottleneck scale to large clusters where a central registry becomes a CPU and network hotspot."
+context = "The scalability argument is the right one. A central registry serves O(N) queries per gossip period; gossip distributes the load across all nodes with no central component. For small N, the central registry is simpler and adequate; for large N, gossip's lack of bottleneck matters. The other options are wrong: gossip is *weaker* than consensus; gossip uses comparable or more memory (every node tracks every other); gossip is slower than consensus for individual decisions because consensus is point-in-time and gossip needs propagation rounds."
+prompt.prompt = """
+The constellation's edge layer scales to 250+ nodes. Why is gossip-based membership the right architecture, rather than a centralized registry?
+"""
+
+[[questions]]
+id = "237668a8-2abc-bb2c-8394-051627384950"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Indirect probes are faster than direct probes.",
+    "Indirect probes provide cryptographic authentication of the target.",
+    "Indirect probes verify the target via multiple network paths, distinguishing 'target is dead' from 'my path to the target is broken.'"
+]
+answer.answer = "Indirect probes verify the target via multiple network paths, distinguishing 'target is dead' from 'my path to the target is broken.'"
+context = "The indirect probe is the key SWIM innovation. A direct probe failure could mean the target is dead or that the prober's network path is broken; the indirect probes ask K other nodes to verify, which routes around the prober's local issue. If any indirect path succeeds, the target is alive and the failure is local to the prober. This dramatically reduces false positives. The other options misstate the mechanism: indirect probes are slower (extra hop); they don't provide cryptographic guarantees; that's a different concern."
+prompt.prompt = """
+SWIM uses a two-step probe: direct, then indirect via K random peers. Why specifically does indirect probing reduce false positive rates compared to a simple timeout?
+"""
+
+[[questions]]
+id = "3487798a-3abc-cc3d-9405-162738495061"
+type = "Tracing"
+prompt.program = """
+fn diverged_ranges_count(a_hash: u32, b_hash: u32, depth: u32, out: &mut u32) {
+    if a_hash == b_hash {
+        return;  // subtree identical - skip
+    }
+    if depth == 0 {
+        *out += 1;  // leaf-level divergence
+        return;
+    }
+    // Recurse into children. We simulate child hashes by mixing the bits.
+    diverged_ranges_count(a_hash >> 1, b_hash >> 1, depth - 1, out);
+    diverged_ranges_count(a_hash | 1, b_hash | 2, depth - 1, out);
+}
+
+fn main() {
+    let mut c1 = 0;
+    diverged_ranges_count(42, 42, 4, &mut c1);
+    print!(\"{} \", c1);
+
+    let mut c2 = 0;
+    diverged_ranges_count(0xABCD, 0xABCE, 4, &mut c2);
+    print!(\"{} \", c2);
+
+    let mut c3 = 0;
+    diverged_ranges_count(0xFFFF, 0x0000, 4, &mut c3);
+    print!(\"{}\", c3);
+}
+"""
+answer.doesCompile = true
+answer.stdout = "0 2 16"
+context = "Case 1: 42 == 42, no recursion, count stays 0. Case 2: 0xABCD vs 0xABCE differ only in the low two bits. The `>> 1` recursion path eventually shifts past the difference and the subtree returns early; the `| 1` / `| 2` path can collapse differences when the bits being OR'd in were already set on both sides. The result is that only a small number of leaves are reached — 2 in this case. Case 3: 0xFFFF vs 0x0000 differ in every bit position. Every recursion branch preserves the difference all the way to the leaves, so all 16 leaves are counted. The takeaway is the operational shape of Merkle anti-entropy: when divergence is localized (case 2), the tree comparison narrows in on the small set of differing leaves; when divergence is everywhere (case 3), the tree gives no speedup over a per-key comparison. In the production case (one key out of millions has diverged), the savings are dramatic — only that key's leaf is identified."
+prompt.prompt = """
+A simplified Merkle-divergence counter. What does this program print?
+"""
+
+[[questions]]
+id = "459888ab-4abc-dd4e-0516-273849506172"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Use gossip for both, since gossip scales naturally.",
+    "Use consensus for both, since consensus provides stronger guarantees.",
+    "Use gossip for the small tier and consensus for the large tier."
+]
+answer.answer = "Use consensus for the small tier (5 nodes) and gossip for the large tier (250 nodes), with the consensus tier acting as a strongly-consistent registry that the gossip tier reads from."
+context = "This is the standard cloud-native split. Consensus is right when N is small and the value of strong consistency is high (cluster membership for the consensus tier itself, leader election, configuration). Gossip is right when N is large and the workload is broadcast-shaped. The two layers communicate at a defined boundary. Using gossip for the consensus tier would not provide the strong guarantees needed; using consensus for the edge tier would not scale to 250 nodes."
+prompt.prompt = """
+The constellation has two tiers: a 5-node consensus cluster running Raft, and a 250-node edge layer needing membership awareness. Which architecture is correct?
+"""
+
+[[questions]]
+id = "56a9a9bc-5abc-ee5f-1627-384950617283"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Push-pull is required for vector clocks; push alone uses Lamport timestamps.",
+    "Push-pull uses less bandwidth than push alone.",
+    "Push-pull is more secure than push or pull."
+]
+answer.answer = "Push-pull is symmetric: both nodes end the exchange with the union of their state. Push or pull alone only updates one side per exchange, so propagation is slower."
+context = "The convergence-speed argument is the right one. In push-pull, each round both peers benefit; in push-only, only the recipient benefits; in pull-only, only the requester does. Push-pull converges in O(log N) rounds with smaller constants than pure push or pull. The other options are wrong: clock type is independent of gossip direction; push-pull uses more bandwidth than push alone (both sides send); security is unrelated."
+prompt.prompt = """
+Why is push-pull gossip the standard production form, compared to push-only or pull-only?
+"""

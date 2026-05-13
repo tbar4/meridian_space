@@ -1,0 +1,87 @@
+[[questions]]
+id = "bd010102-babc-44b5-7283-940516273849"
+type = "MultipleChoice"
+prompt.distractors = [
+    "First-fit",
+    "Worst-fit",
+    "Round-robin placement"
+]
+answer.answer = "Best-fit"
+context = "Best-fit places each job on the machine with the smallest residual that still fits, which tends to fill machines tightly and leave others empty for larger future jobs. This concentrates load, freeing up machines for large jobs that wouldn't fit on a partially-filled one. Worst-fit (place on largest residual) distributes evenly, leaving small residuals everywhere — the opposite of what the team wants. First-fit is fast but doesn't optimize for concentration. Round-robin is fair across machines but doesn't address the fragmentation issue."
+prompt.prompt = """
+The fleet has 38% utilization but jobs are being rejected for lack of capacity — the load is distributed across many machines, none of which has enough free space for incoming jobs. Which placement algorithm tends to concentrate load on a smaller set of machines, leaving others fully available?
+"""
+
+[[questions]]
+id = "ce121213-cabc-55c6-8394-051627384950"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Headroom and overcommitment are mutually exclusive operational practices.",
+    "Headroom prevents overcommitment from extracting any aggregate utilization gains.",
+    "Headroom only matters at the fleet level; overcommitment only matters per-machine."
+]
+answer.answer = "Headroom (per-machine reserved capacity) absorbs per-machine spikes; overcommitment (total fleet allocation exceeds physical capacity) extracts aggregate utilization from uncorrelated demand. They complement each other."
+context = "The two practices operate at different scales and complement each other. Headroom keeps individual machines from being saturated by their own job's spikes (protects against per-machine failure modes). Overcommitment relies on the statistical observation that not all jobs use their full allocation simultaneously, extracting aggregate utilization at the fleet level. They are not mutually exclusive; production systems use both. The other options misstate the relationship."
+prompt.prompt = """
+Why are 'headroom' and 'overcommitment' described as complementary practices rather than conflicting?
+"""
+
+[[questions]]
+id = "df232324-dabc-66d7-9405-162738495061"
+type = "Tracing"
+prompt.program = """
+struct Machine { id: &'static str, cpu_free: u32, mem_free: u32 }
+
+fn place_best_fit(machines: &[Machine], cpu_req: u32, mem_req: u32) -> Option<&'static str> {
+    machines.iter()
+        .filter(|m| m.cpu_free >= cpu_req && m.mem_free >= mem_req)
+        .min_by_key(|m| (m.cpu_free - cpu_req) + (m.mem_free - mem_req))
+        .map(|m| m.id)
+}
+
+fn main() {
+    let ms = vec![
+        Machine { id: \"A\", cpu_free: 2, mem_free: 4 },
+        Machine { id: \"B\", cpu_free: 6, mem_free: 12 },
+        Machine { id: \"C\", cpu_free: 10, mem_free: 20 },
+    ];
+    print!(\"{:?} \", place_best_fit(&ms, 1, 2));
+    print!(\"{:?} \", place_best_fit(&ms, 5, 8));
+    print!(\"{:?} \", place_best_fit(&ms, 7, 15));
+    print!(\"{:?}\", place_best_fit(&ms, 15, 25));
+}
+"""
+answer.doesCompile = true
+answer.stdout = "Some(\"A\") Some(\"B\") Some(\"C\") None"
+context = "Job (1,2): A fits with slack (1+2)=3; B with (5+10)=15; C with (9+18)=27. A wins (tightest). Job (5,8): A doesn't fit (5>2); B fits with slack (1+4)=5; C with (5+12)=17. B wins. Job (7,15): A no, B no (7>6), C fits with slack (3+5)=8. C wins. Job (15,25): no machine fits — returns None. The pattern: best-fit fills tighter machines first, preserving larger machines for jobs that need them."
+prompt.prompt = """
+A best-fit placement algorithm. What does this program print?
+"""
+
+[[questions]]
+id = "f0343435-eabc-77e8-0516-273849506172"
+type = "MultipleChoice"
+prompt.distractors = [
+    "60% — to leave plenty of capacity for spikes.",
+    "85-90% — to maximize utilization, since the pipeline can tolerate retries.",
+    "95% — modern schedulers can run safely at this level."
+]
+answer.answer = "85-90% — the workload is batch-tolerant and the queueing-latency cliff is acceptable up to about 90%."
+context = "The utilization vs latency tradeoff says: latency-critical workloads (sub-100ms) cap below 70%; batch workloads can run at 85-90%. The catalog's reconciliation is batch-tolerant — completing within the day is fine — so the higher utilization is appropriate. The queueing-latency formula 1/(1-ρ) shows costs explode past 90%; 95% is risky territory. 60% is too conservative for batch; 95% is too aggressive."
+prompt.prompt = """
+The catalog's reconciliation pipeline is batch work — it must complete within the day but individual jobs don't have strict latency budgets. What target utilization is appropriate?
+"""
+
+[[questions]]
+id = "01454546-fabc-88f9-1627-384950617283"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Apply the bin-packing algorithm to all machines, then check constraints on the result.",
+    "Score each machine on bin-packing fit and constraint satisfaction together, picking the highest combined score.",
+    "Run two separate placements: one for constrained jobs, one for unconstrained."
+]
+answer.answer = "Filter the machine set by all hard constraints first, then apply the bin-packing algorithm to the remaining candidates."
+context = "Filter-then-pack is the correct structure. Hard constraints (GPU required, region must be us-east, anti-affinity with rival pod) eliminate candidates that cannot satisfy them; bin-packing among the remaining candidates picks the best fit. Reversing the order (pack first, check after) wastes work and may not find a feasible placement even when one exists. Scoring constraints alongside fit is wrong because hard constraints are pass/fail, not a score. Two separate placements miss the case where most jobs have some constraints."
+prompt.prompt = """
+A scheduler needs to honor hard constraints (e.g., GPU required) and apply best-fit bin-packing. What is the correct structure?
+"""

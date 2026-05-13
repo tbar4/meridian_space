@@ -1,0 +1,116 @@
+[[questions]]
+id = "ef9ca3b4-c5d6-e7f8-a9b0-c1d2e3f4a5b6"
+type = "MultipleChoice"
+prompt.distractors = [
+    "The candidate's log size must be at least as large as the voter's log size.",
+    "The candidate must have received heartbeats from a majority of nodes within the last election timeout.",
+    "The candidate must be a former leader of the cluster.",
+]
+answer.answer = "The candidate's last log entry must have a term greater than the voter's last log term, or the same term with an index greater than or equal to the voter's last log index."
+context = "The election restriction's 'up-to-date' definition is precise: a higher last-entry term wins; ties go to the higher last-entry index. This guarantees that any leader elected has every committed entry — because committed entries exist on a majority, any vote-granting majority overlaps with the commit majority, and the overlapping voter would reject any candidate missing those entries. The other choices misstate the rule (size is not the criterion; heartbeats are leaders' job; former-leader status is irrelevant)."
+prompt.prompt = """
+A Raft follower is asked to grant a vote to a candidate. The election restriction says it should grant the vote only if the candidate's log is 'at least as up-to-date' as its own. Which precise definition of 'up-to-date' does Raft use?
+"""
+
+[[questions]]
+id = "f0adb4c5-d6e7-f8a9-b0c1-d2e3f4a5b6c7"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Followers will run out of disk space when their logs grow indefinitely.",
+    "Heartbeats from the partitioned leader will conflict with the new leader's heartbeats.",
+    "Clients connected to the partitioned leader will see stale reads but no other anomalies.",
+]
+answer.answer = "The partitioned leader cannot commit new entries because it cannot reach a majority, and when the partition heals, its uncommitted log entries will be overwritten by the new leader's entries (which the election restriction guarantees are at least as up-to-date)."
+context = "The deposed-leader scenario: the partitioned leader continues to think it's leader and appends to its local log, but those entries are never committed because they don't reach a majority. When the partition heals, the partitioned leader observes a higher term, reverts to follower, and the new leader truncates and replaces any divergent suffix on the now-follower's log. The safety property is preserved because no committed entry is lost. The other options misstate the consequence (disk space is not the issue; heartbeats don't 'conflict' — higher terms simply win; stale reads are a real concern but not the main protocol-level issue)."
+prompt.prompt = """
+A leader is in the minority side of a network partition; the majority side has elected a new leader. What happens to the partitioned (original) leader's uncommitted log entries when the partition heals?
+"""
+
+[[questions]]
+id = "01beb5d6-e7f8-a9b0-c1d2-e3f4a5b6c7d8"
+type = "Tracing"
+prompt.program = """
+#[derive(Clone, Debug, PartialEq)]
+struct LogEntry { term: u64, index: u64 }
+
+struct Log { entries: Vec<LogEntry> }
+
+impl Log {
+    fn append_with_check(&mut self, prev_index: u64, prev_term: u64, new_entries: Vec<LogEntry>) -> bool {
+        if prev_index > 0 {
+            match self.entries.iter().find(|e| e.index == prev_index) {
+                Some(e) if e.term == prev_term => {}
+                _ => return false,
+            }
+        }
+        for new_entry in &new_entries {
+            if let Some(pos) = self.entries.iter().position(|e| e.index == new_entry.index) {
+                if self.entries[pos].term != new_entry.term {
+                    self.entries.truncate(pos);
+                    break;
+                }
+            }
+        }
+        for new_entry in new_entries {
+            if !self.entries.iter().any(|e| e.index == new_entry.index) {
+                self.entries.push(new_entry);
+            }
+        }
+        true
+    }
+}
+
+fn main() {
+    let mut log = Log {
+        entries: vec![
+            LogEntry { term: 1, index: 1 },
+            LogEntry { term: 1, index: 2 },
+            LogEntry { term: 2, index: 3 },
+        ],
+    };
+
+    // Case 1: prev matches, append a new entry
+    let r1 = log.append_with_check(3, 2, vec![LogEntry { term: 3, index: 4 }]);
+    print!(\"{} \", r1);
+    print!(\"{} \", log.entries.len());
+
+    // Case 2: conflict at index 3 with different term - triggers truncation
+    let r2 = log.append_with_check(2, 1, vec![LogEntry { term: 3, index: 3 }]);
+    print!(\"{} \", r2);
+    print!(\"{}\", log.entries.len());
+}
+"""
+answer.doesCompile = true
+answer.stdout = "true 4 true 3"
+context = "Case 1: prev_index=3, prev_term=2 matches existing entry — append succeeds, log grows to 4 entries: prints 'true 4'. Case 2: prev_index=2, prev_term=1 matches existing entry. The new entry has index=3 term=3, but existing index 3 has term=2 — conflict detected, log truncated at position 2 (removing the old index 3 and beyond). New entry index 3 term 3 is appended. Log is now 3 entries: indices 1, 2 (old) and 3 (new, term 3). Prints 'true 3'. The truncation behavior is what recovers from leader changes with divergent suffixes."
+prompt.prompt = """
+A Raft log replication handler with the log matching property. What does this program print?
+"""
+
+[[questions]]
+id = "12cfb6e7-f8a9-b0c1-d2e3-f4a5b6c7d8e9"
+type = "MultipleChoice"
+prompt.distractors = [
+    "All followers acknowledge the entry.",
+    "The leader has written the entry to its local disk.",
+    "The followers have applied the entry to their state machines.",
+]
+answer.answer = "A majority of nodes (including the leader) have stored the entry in their logs."
+context = "Raft considers an entry committed when a majority of nodes have it durably stored. This is the property that ensures the entry survives any failure of a minority of nodes. Not 'all followers' (a single slow follower would block commits). Not 'leader writes to disk' (a single node is not enough). Not 'followers apply to state machine' — application happens after commit, not before. The commit threshold is majority storage, not all storage and not application."
+prompt.prompt = """
+A Raft client submits a write to the leader. The leader appends to its log and dispatches AppendEntries to all followers. At what point does Raft consider the entry committed?
+"""
+
+[[questions]]
+id = "23d0c7f8-a9b0-c1d2-e3f4-a5b6c7d8e9f0"
+type = "MultipleChoice"
+prompt.distractors = [
+    "To prevent network message reordering.",
+    "To reduce the leader's CPU cost.",
+    "To provide better load balancing across followers.",
+]
+answer.answer = "To prevent split votes by making it overwhelmingly likely that one candidate's election starts before any other's."
+context = "Randomized election timeouts spread out the moments when followers become candidates. If all followers had the same timeout, they would all start elections simultaneously and split the vote, repeating indefinitely. With randomized timeouts (typically a uniform random value in 150–300ms), one follower will time out first, start its election, and win before others time out. The other choices are wrong: randomization doesn't affect reordering, CPU cost, or load balancing — it specifically addresses the split-vote failure mode."
+prompt.prompt = """
+Raft's election timeout is randomized within a window (typically 150–300ms). Why is randomization important?
+"""

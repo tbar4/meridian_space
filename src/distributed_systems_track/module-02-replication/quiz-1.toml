@@ -1,0 +1,108 @@
+[[questions]]
+id = "a1b2c3d4-e5f6-a7b8-c9d0-e1f2a3b4c5d6"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Synchronous replication never loses acknowledged writes; asynchronous always does.",
+    "Synchronous replication has lower write latency than asynchronous because followers can batch acknowledgments.",
+    "Asynchronous replication requires fewer followers than synchronous to be considered safe.",
+]
+answer.answer = "Synchronous replication trades higher write latency for durability across machines; asynchronous trades write latency for the risk of losing acknowledged writes if the leader fails before propagation."
+context = "This is the central tradeoff. Synchronous waits for follower acknowledgment, paying latency for durability. Asynchronous returns success as soon as the leader has the write locally, so a leader-only-durable acknowledged write can be lost if the leader fails before the log ships. 'Synchronous never loses' is too strong (it depends on the quorum size and definition); 'synchronous has lower latency' is reversed; 'asynchronous needs fewer followers' is unrelated."
+prompt.prompt = """
+A team is choosing between synchronous and asynchronous replication for the catalog's primary. Which statement best characterizes the tradeoff?
+"""
+
+[[questions]]
+id = "b2c3d4e5-f6a7-b8c9-d0e1-f2a3b4c5d6e7"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Logical (row-based) replication",
+    "Trigger-based replication",
+    "Statement-based replication",
+]
+answer.answer = "Write-ahead log (WAL) shipping"
+context = "WAL shipping is byte-level: it ships the same bytes the leader's storage engine wrote. This makes it exactly correct (the follower applies the same disk operations) but ties the replica to the same engine version. Logical replication decouples the format from the engine and allows cross-version. Statement-based requires deterministic operations and is fragile. Trigger-based is a separate mechanism, typically used for selective replication, not full-database replication."
+prompt.prompt = """
+The catalog team needs to upgrade PostgreSQL from version 16 to 17 with zero downtime. They plan a rolling upgrade: upgrade the follower first, then promote it to leader. Which replication strategy will prevent this plan from working because the replication format is tightly coupled to the storage engine version?
+"""
+
+[[questions]]
+id = "c3d4e5f6-a7b8-c9d0-e1f2-a3b4c5d6e7f8"
+type = "MultipleChoice"
+prompt.distractors = [
+    "The new leader's clock is ahead of the old leader's by some amount, causing duplicate timestamps.",
+    "The failover coordinator may itself fail during the operation, leaving the cluster leaderless.",
+    "Asynchronous replication may have left some acknowledged writes unpropagated to the candidate before the leader failed.",
+]
+answer.answer = "The old leader may not actually be dead, and accepting writes on both leaders produces a split-brain that is not resolvable without coordination."
+context = "Split brain is the canonical hazard: the failover decision is based on a failure detector that can be wrong. If the old leader is partitioned but still accepting writes, promoting a new one produces two write streams with no general-purpose merge. Fencing tokens (rejecting writes from older generations) is the standard defense. The other choices are also real failover hazards, but the question asks for the one a fencing token addresses — and fencing is specifically the split-brain mitigation."
+prompt.prompt = """
+A failover plan promotes a follower to leader after the failure detector declares the current leader dead. The team adds 'fencing tokens' (generation numbers) to the design. Which specific hazard do fencing tokens address?
+"""
+
+[[questions]]
+id = "d4e5f6a7-b8c9-d0e1-f2a3-b4c5d6e7f8a9"
+type = "Tracing"
+prompt.program = """
+use std::sync::atomic::{AtomicU64, Ordering};
+
+struct LagSimulator {
+    leader_state: AtomicU64,
+    follower_state: AtomicU64,
+    pending_log: AtomicU64,  // not yet applied to follower
+}
+
+impl LagSimulator {
+    fn new() -> Self {
+        Self {
+            leader_state: AtomicU64::new(0),
+            follower_state: AtomicU64::new(0),
+            pending_log: AtomicU64::new(0),
+        }
+    }
+    fn write(&self, delta: u64) {
+        self.leader_state.fetch_add(delta, Ordering::SeqCst);
+        self.pending_log.fetch_add(delta, Ordering::SeqCst);
+    }
+    fn apply_pending(&self) {
+        let p = self.pending_log.swap(0, Ordering::SeqCst);
+        self.follower_state.fetch_add(p, Ordering::SeqCst);
+    }
+    fn read_follower(&self) -> u64 {
+        self.follower_state.load(Ordering::SeqCst)
+    }
+}
+
+fn main() {
+    let s = LagSimulator::new();
+    s.write(10);
+    s.write(5);
+    print!(\"{} \", s.read_follower());
+    s.apply_pending();
+    print!(\"{} \", s.read_follower());
+    s.write(20);
+    print!(\"{} \", s.read_follower());
+    s.apply_pending();
+    print!(\"{}\", s.read_follower());
+}
+"""
+answer.doesCompile = true
+answer.stdout = "0 15 15 35"
+context = "The first read happens before any pending log is applied: prints 0 (follower has nothing yet). After apply_pending, the follower catches up to leader's 15: prints 15. After write(20), the follower hasn't yet applied: still prints 15 (the lag window). After apply_pending, the follower catches up to 35. This is replication lag in miniature: reads from the follower can return stale values bounded by how long since the last apply."
+prompt.prompt = """
+A simulated leader-follower pair with explicit lag. What does this program print?
+"""
+
+[[questions]]
+id = "e5f6a7b8-c9d0-e1f2-a3b4-c5d6e7f8a9b0"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Add a second synchronous follower to the cluster.",
+    "Increase the read-replica fleet to spread load further.",
+    "Lower the database's commit fsync interval to flush writes faster.",
+]
+answer.answer = "Pin the writing client's reads to the leader for a session-scoped window after each write."
+context = "The complaint is a read-after-write anomaly: the writing client cannot see its own writes immediately. The cause is replication lag plus follower-served reads. The fix is to route the writer's subsequent reads to the leader for a window after each write — read-your-writes via session affinity. Adding more synchronous followers reduces lag but doesn't address the read-routing issue; more read replicas would worsen it; fsync intervals affect durability, not read freshness."
+prompt.prompt = """
+The catalog's read traffic is served from followers. A ground station reports: 'I submitted a TLE update; the next GET of that TLE shows the old value.' Replication lag from leader to follower is measured at 200ms. What is the cheapest fix that preserves read scalability?
+"""

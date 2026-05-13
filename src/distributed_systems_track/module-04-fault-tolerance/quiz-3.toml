@@ -1,0 +1,102 @@
+[[questions]]
+id = "2347a879-2abc-ab1c-2d3e-4f5061728394"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Vary real-world events",
+    "Run experiments in production",
+    "Automate experiments to run continuously",
+]
+answer.answer = "Build a hypothesis around steady-state behavior"
+context = "The hypothesis principle is the prerequisite for the others to be meaningful. Without a measurable definition of normal, you cannot tell whether a chaos experiment showed the system was resilient or merely showed that the system was indistinguishable from before — and you cannot tell whether the result is repeatable. The hypothesis turns the experiment into science rather than vandalism. The other principles are also important, but the hypothesis is the prerequisite for them to produce knowledge."
+prompt.prompt = """
+The Principles of Chaos Engineering specify four guiding ideas. Which is the principle that turns a chaos experiment from 'we broke something and see what happens' into a falsifiable scientific test?
+"""
+
+[[questions]]
+id = "3458b98a-3abc-bc2d-3e4f-506172839405"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Increase the size of the bulkhead pool.",
+    "Decrease the call timeout to fail faster.",
+    "Add monitoring that alerts when downstream latency exceeds 1 second.",
+]
+answer.answer = "Add a latency injection chaos experiment that exercises the slow-downstream-but-not-failing scenario, surfacing the gap before production does."
+context = "The 30-second high-latency response that fell within the timeout and above the bulkhead-acquire wait is exactly the failure mode that pre-deployment testing missed. The systematic fix is to test that scenario — inject latency, observe the resilience layer's behavior, fix the gap that surfaces. Increasing the bulkhead doesn't address the underlying gap; decreasing timeout will produce false positives elsewhere; monitoring alerts after the fact rather than preventing the gap from arising."
+prompt.prompt = """
+The catalog's incident showed that a 30-second latency response fell within the call timeout but above the bulkhead-acquire wait, producing an unanticipated outage. The resilience patterns were correct but the gap between them wasn't tested. What is the systematic prevention?
+"""
+
+[[questions]]
+id = "4569ca9b-4abc-cd3e-4f50-617283940516"
+type = "Tracing"
+prompt.program = """
+struct ExperimentResult {
+    injected_at_ms: u64,
+    detected_at_ms: Option<u64>,
+    resolved_at_ms: Option<u64>,
+}
+
+impl ExperimentResult {
+    fn mttd_ms(&self) -> Option<u64> {
+        self.detected_at_ms.map(|d| d.saturating_sub(self.injected_at_ms))
+    }
+    fn mttr_ms(&self) -> Option<u64> {
+        match (self.detected_at_ms, self.resolved_at_ms) {
+            (Some(d), Some(r)) => Some(r.saturating_sub(d)),
+            _ => None,
+        }
+    }
+}
+
+fn main() {
+    let e1 = ExperimentResult {
+        injected_at_ms: 1000,
+        detected_at_ms: Some(1180),
+        resolved_at_ms: Some(2400),
+    };
+    print!(\"{:?} \", e1.mttd_ms());
+    print!(\"{:?} \", e1.mttr_ms());
+
+    let e2 = ExperimentResult {
+        injected_at_ms: 1000,
+        detected_at_ms: None,
+        resolved_at_ms: None,
+    };
+    print!(\"{:?} \", e2.mttd_ms());
+    print!(\"{:?}\", e2.mttr_ms());
+}
+"""
+answer.doesCompile = true
+answer.stdout = "Some(180) Some(1220) None None"
+context = "e1: MTTD = 1180 - 1000 = 180ms; MTTR = 2400 - 1180 = 1220ms. e2: injected but never detected — MTTD returns None; MTTR also returns None since detection never occurred. The 'never detected' case is the chaos engineering finding most worth fixing: the experiment surfaced a monitoring gap (the fault was injected but went unnoticed), which is a much more dangerous gap than a slow MTTR."
+prompt.prompt = """
+A chaos experiment results tracker. What does this program print?
+"""
+
+[[questions]]
+id = "567adbac-5abc-de4f-5061-728394051627"
+type = "MultipleChoice"
+prompt.distractors = [
+    "The system has fewer dependencies than typical production systems.",
+    "The chaos experiments are too lightweight to find real bugs.",
+    "Chaos engineering only works for stateless services.",
+]
+answer.answer = "The experiments are not exercising the system's actual weak points, possibly because the failure scenarios chosen don't match the failure modes the system is susceptible to."
+context = "A chaos program that finds nothing is suspicious in proportion to how confident you are that the system has no bugs (which should be very low). Far more likely: the experiments are testing scenarios the system was specifically designed to handle (Chaos Monkey kills instances; the architecture was built to tolerate instance loss; the experiment passes trivially). The fix is to rotate experiment categories and target unknown weaknesses, not to declare success. The other options are not the typical cause: most systems are not surprisingly more robust than the typical system; experiment weight is rarely the issue; chaos works for stateful systems too (and FoundationDB shows it works exceptionally well for them)."
+prompt.prompt = """
+A team's chaos engineering program runs 20 experiments per month and 'all of them pass' — no findings, no surprises. What is the most likely interpretation?
+"""
+
+[[questions]]
+id = "678becbd-6abc-ef50-6172-839405162738"
+type = "MultipleChoice"
+prompt.distractors = [
+    "Deterministic simulation is faster than running production tests.",
+    "Deterministic simulation does not require running real network or disk I/O.",
+    "Deterministic simulation allows exact replay of bug-producing schedules via seeds.",
+]
+answer.answer = "All of the above."
+context = "All three are real properties of deterministic simulation testing. The speed advantage is significant (millions of simulated seconds per real second). The no-I/O property is what makes that speed possible (everything is in-memory). The seed-based replay is what makes bug fixes verifiable — the exact failing trace can be re-run. The combination is what gives the approach its dramatic power for systems amenable to it (FoundationDB, TigerBeetle)."
+prompt.prompt = """
+Deterministic simulation testing, as practiced by FoundationDB, has several advantages over production chaos engineering. Which is true?
+"""
