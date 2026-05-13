@@ -1,0 +1,189 @@
+[[questions]]
+id = "86720d2b-f7a7-40f2-8f4f-d604ca814ccb"
+type = "MultipleChoice"
+prompt.prompt = """
+The on-call engineer is paged at 02:00 AM. The dashboard shows the
+SDA pipeline's lag metric is rising — `now - sensor_timestamp` is at
+180 seconds and climbing. Per the lesson's diagnostic pattern, what
+should the engineer's first action be?
+"""
+answer.answer = "Check pipeline_lag_seconds and source_lag_seconds split (M6 L1's two-component lag). If source_lag is the dominant component, the cause is upstream of ingestion (a partner-side problem, the radar's network path). If pipeline_lag is the dominant component, the cause is inside the pipeline (a slow operator, a full channel, a stalled checkpoint). The split immediately tells the engineer 'is the problem ours or theirs' — which determines whether the next hour is spent investigating internal pipeline state or contacting the partner. The remaining diagnostic steps differ depending on the answer."
+prompt.distractors = [
+    "Open the tracing UI and pull a recent slow-path event's trace to see where time is being spent. The span tree gives the most direct read of where the latency is concentrated; the metric layer is too aggregated to identify the specific operator",
+    "Inspect the checkpoint_age_seconds metric for the windowed correlator. A stalled checkpoint is a common cause of lag spikes (the operator can't make progress without flushing its state) and is the most likely cause given the failure signature",
+    "Run `sda-reprocess --dry-run --since 30m` to see how many events would need to be re-injected. The re-processing volume estimate gives a sense of whether this is a 'partial degradation' or a 'full outage' incident",
+]
+context = """
+The lag-split-as-first-step framing is the lesson's specific diagnostic
+pattern. The dominant component of lag is what determines the
+investigation path; without that split, the engineer is guessing
+between two very different sets of causes. The tracing-first answer
+inverts the workflow: tracing is for the per-event 'why' question,
+metrics are for the 'what's wrong and where' question, and the
+metrics layer is where you start. The checkpoint-age answer guesses
+at a specific cause without first checking which side of the lag
+the issue is on. The reprocess answer is operationally relevant once
+a fix is in place, not as a diagnostic step. The lesson's pattern:
+metrics for first-look (split lag, then per-stage), then drill-down
+into lineage and tracing as the cause becomes clearer.
+"""
+
+[[questions]]
+id = "6912e9f3-0028-47a2-bdac-a141cfc03540"
+type = "MultipleChoice"
+prompt.prompt = """
+A teammate proposes adding `tracing::info!(\"event received\", ?obs)`
+inside the windowed correlator's per-event hot loop, on the grounds
+that 'we want every event traced for debugging.' The tracing-subscriber
+is configured at INFO level. What does the lesson predict the
+operational consequence will be?
+"""
+answer.answer = "At SDA's volumes (10K events/sec across the pipeline), the per-event info! call produces 10K log lines per second, each serialized to JSON with the full Observation payload. The serialization cost dominates the operator's hot path — likely 100x the actual processing cost — and the log volume saturates the tracing-subscriber's output buffer. The dashboard becomes useless under the volume; the disk filling up triggers ops alerts; the pipeline's throughput drops. The lesson's discipline: per-event log lines belong at debug! or trace! level, NOT info!; and the full payload should never be serialized in a hot-path log. Use #[tracing::instrument(skip(obs), fields(observation_id = %obs.observation_id))] for span-level instrumentation; reserve info! for lifecycle events (operator started, operator shutting down)."
+prompt.distractors = [
+    "The operator's throughput improves because tracing::info! is asynchronous and offloads logging to a background task; the hot loop gets a small cost reduction. The downside is just dashboard clutter, which is acceptable",
+    "tracing::info! at this level is fine because the JSON serialization is lazy — the args are not evaluated until the subscriber decides to emit. With dashboard configured to filter by stage, the volume is manageable",
+    "The teammate's pattern is the canonical 'comprehensive logging' practice; it produces necessary data for incident response. The cost is real but justified, and modern observability backends scale to absorb it",
+]
+context = """
+The volume-multiplied-by-serialization-cost is the operational
+problem the lesson warns against. tracing::info! is NOT asynchronous
+in the sense that the field interpolation happens at log-emission
+time — `?obs` calls Debug::fmt eagerly, allocating a String per call.
+At 10K events/sec the cost is dominant. The 'lazy evaluation' answer
+inverts the reality (Debug::fmt is eager). The 'comprehensive
+logging is necessary' answer is the cargo-cult pattern the lesson
+explicitly warns against. The right pattern is span-level
+instrumentation (one structured span per event, with cheap
+attributes) plus debug! for inner-loop detail when needed during
+investigation. info! is for lifecycle events that fire rarely.
+"""
+
+[[questions]]
+id = "c4820082-46ea-4e00-8d04-709d080ae18d"
+type = "Tracing"
+prompt.program = """
+// Simulate deterministic head-sampling at 1% rate using a hash of the
+// event_id (here a u64 standing in for a UUID). Print which events
+// from a sequence are sampled and the final count vs the expected count.
+
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+fn should_trace(event_id: u64, sample_rate_pct: u8) -> bool {
+    let mut h = DefaultHasher::new();
+    event_id.hash(&mut h);
+    let bucket = (h.finish() % 100) as u8;
+    bucket < sample_rate_pct
+}
+
+fn main() {
+    let event_ids: Vec<u64> = (1000..1020).collect();  // 20 events
+    let sample_rate = 25u8;  // 25% to make the trace produce a few samples
+    let mut sampled_count = 0u32;
+    for id in &event_ids {
+        let traced = should_trace(*id, sample_rate);
+        if traced {
+            sampled_count += 1;
+            println!("event_id={} sampled", id);
+        }
+    }
+    let total = event_ids.len() as u32;
+    let expected = total * sample_rate as u32 / 100;
+    println!("total={} sampled={} expected_at_{}pct={}",
+             total, sampled_count, sample_rate, expected);
+
+    // Demonstrate determinism: re-running on the same input gives the
+    // same answers.
+    let again_count: u32 = event_ids.iter()
+        .filter(|&&id| should_trace(id, sample_rate)).count() as u32;
+    println!("deterministic_rerun_count={} matches_first={}",
+             again_count, again_count == sampled_count);
+}
+"""
+answer.doesCompile = true
+answer.stdout = """event_id=1007 sampled
+event_id=1011 sampled
+event_id=1018 sampled
+total=20 sampled=3 expected_at_25pct=5
+deterministic_rerun_count=3 matches_first=true"""
+context = """
+The trace exercises the deterministic-hash-sampling property the
+lesson recommends. With 20 events and a 25% sample rate, the expected
+count is 5 (20 × 0.25). The actual sample count is 3, which is below
+expected — exactly the kind of small-sample variation a hash function
+exhibits when applied to a small sequential range. At SDA's scale
+(millions of events per minute) this variation washes out and the
+actual sample rate matches the configured rate to within fractions
+of a percent; at 20-event scale the variance is visible.
+
+The deterministic-rerun line confirms the operationally important
+property: the same input sequence produces the same sampling
+decisions. Investigators can ask 'is event 1007 in our trace
+corpus?' and get a stable yes/no answer regardless of which replica
+processed it or when the question is asked. The 'matches_first=true'
+output is the load-bearing signal for reproducibility — same hash,
+same decisions, every time.
+"""
+
+[[questions]]
+id = "f7d22e5b-538e-4f79-a826-72ade1aa2ba4"
+type = "MultipleChoice"
+prompt.prompt = """
+The SDA pipeline runs canary observations every 30 seconds with an
+expected max latency of 60 seconds. Operations notices that the
+canary_late_total counter has incremented 4 times in the last 10
+minutes, while real-event metrics (throughput, P99 latency) all
+look nominal. What is the lesson's framing of this signal?
+"""
+answer.answer = "The canaries are catching a regression that real-event metrics are missing. Real-event throughput and P99 might be nominal because the dominant flow is on a fast path (cache hit, common-case branch) while the canaries — which exercise the full pipeline path including cold-cache and edge-case branches — are taking longer than expected. The 4 late canaries in 10 minutes (against an expected 20 emitted) is a 20% miss rate that warrants investigation: open the slow canaries' traces in the tracing UI to see which operator is taking longer, compare against a known-good canary trace, identify the regression. The canary system catches exactly this pipeline-wide subtle regression that the aggregate metrics smooth over."
+prompt.distractors = [
+    "The canary system is over-sensitive — 4 late canaries with otherwise-healthy metrics is well within the canary's noise margin. Adjust the canary's expected max latency to 90 seconds to reduce the false-positive rate",
+    "The canary content has drifted from the production traffic distribution; the canary's exercises a code path that production traffic no longer exercises. Update the canary to match current traffic patterns",
+    "The canary subsystem itself is broken — the canary-watcher's clock is drifting relative to the source's clock, producing false 'late' signals. Verify with NTP sync state",
+]
+context = """
+The regression-detection-by-canary framing is exactly the case the
+lesson develops. Canaries catch what aggregate metrics miss — pipeline-
+wide subtle regressions that don't dominate the aggregate but do
+affect every event's path equally. 4 late canaries with healthy
+real-event metrics is a strong signal that something has changed in
+the pipeline's behavior; the right response is investigation, not
+adjustment. The 'over-sensitive' distractor papers over the signal
+rather than acting on it. The 'canary-content drift' distractor is
+worth considering but is a longer-term tuning concern, not a
+diagnosis. The 'NTP drift' distractor invents a failure mode (NTP
+syncs the clocks within milliseconds; the latency reading would
+require seconds-level skew to be wrong). The lesson's pattern:
+canaries are the regression detector; trust them, investigate when
+they fire.
+"""
+
+[[questions]]
+id = "bce82cc6-6a90-4f39-9d4f-25f9dadbe738"
+type = "MultipleChoice"
+prompt.prompt = """
+The lesson recommends head-based sampling at 1% as the default for
+SDA, with tail-based sampling for the alert path specifically.
+What is the operational tradeoff that motivates the difference, and
+why does the SDA-specific case warrant tail-based for alerts?
+"""
+answer.answer = "Head-based sampling is cheap (single hash per event at the source) but loses errors that occur mid-pipeline because the trace decision was made before the error appeared. Tail-based sampling decides at the sink based on the path's outcome — slow, errored, or otherwise notable — and captures more interesting events but requires buffering all events' spans until the decision is made. For SDA's general traffic, 1% head-based is enough for diagnostic purposes (millions of events per day means thousands of sampled traces). For the alert path specifically, slow or errored alerts are operationally meaningful and rare enough that head-based misses most of them; tail-based ensures every interesting alert path has a captured trace. The combination — head-based for general visibility, tail-based for SLO-relevant paths — is the production pattern."
+prompt.distractors = [
+    "Head-based is faster than tail-based, so head-based is for high-throughput operators and tail-based is for low-throughput operators. The alert path is low-throughput, hence tail-based",
+    "Head-based requires the trace_id to be on the envelope from the start, which adds bytes to every event. Tail-based does not require this, so it has a lower per-event overhead. The alert path's volume justifies the extra-cost, the rest of the pipeline does not",
+    "Tail-based is required by OpenTelemetry's specification for any path that emits spans to a tail-sampling-processor; head-based is the legacy pattern. The SDA alert path is the only path that uses the modern tooling; the rest of the pipeline is legacy",
+]
+context = """
+The lesson is precise about the tradeoff: head-based is cheap and
+simple but misses mid-pipeline errors; tail-based catches more
+interesting events but requires buffering. The two approaches are
+complementary at different points in the pipeline. For general
+visibility 1% head-based is sufficient; for the alert path, slow or
+errored events are exactly the events worth tracing, and tail-based
+ensures they are captured. The other distractors invent unrelated
+properties: head-based and tail-based have similar per-event
+overhead in the steady state; the trace_id field exists in both
+patterns; OpenTelemetry's spec supports both as standard. The
+lesson's framing: choose the sampling strategy per the path's
+operational profile.
+"""
