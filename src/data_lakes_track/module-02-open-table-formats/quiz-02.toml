@@ -1,0 +1,84 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Each level holds enough statistics to prune the next level without reading it, so a query against `mission_id` reads the manifest list to pick manifests, reads only those manifests to pick data files, reads only those data files. Pruning compounds across all three levels."
+prompt.distractors = [
+  "The four levels exist for redundancy: each level is a backup of the next so corrupted metadata can be reconstructed. The pruning benefit is incidental.",
+  "Each level supports a different write pattern (snapshot for time travel, manifest list for parallel writes, manifests for concurrent commits, data files for storage). The pruning benefit is incidental.",
+  "The four levels match the four supported file formats (JSON for snapshots, Avro for manifest lists, Parquet for manifests, Parquet for data). The pruning benefit is incidental."
+]
+prompt.prompt = """
+The Iceberg metadata hierarchy has four levels (catalog pointer → snapshot → manifest list → manifest → data file). What is the central design rationale for this many levels?
+"""
+context = "The hierarchy's purpose is read-time pruning. Manifest-list summaries enable manifest-level pruning without reading manifests; manifest entries enable file-level pruning without reading data files; the Parquet footer (Module 1) enables row-group-level pruning. A query against `mission_id = 'apollo-7'` reads one manifest list, perhaps three manifests, perhaps a few hundred data files — out of a table with hundreds of manifests and tens of thousands of data files. The compounding pruning is what makes the format scale. None of the distractors describes the design's actual rationale."
+id = "648de179-6008-426c-8e96-8645df6e8095"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Write twelve data files, write one new manifest listing them, write one new manifest list (referencing the base's existing manifests plus the new one), write a new snapshot pointing at the new manifest list. The base's manifest list and existing manifests are not rewritten."
+prompt.distractors = [
+  "Write twelve data files, rewrite the existing manifest list to include the new files, then update the snapshot to point at the modified manifest list. The base manifest list must be modified to reflect the new files.",
+  "Write twelve data files, rewrite every existing manifest to remove duplicates, write a new manifest list, write a new snapshot. The manifests must be consolidated on every commit.",
+  "Write twelve data files, write twelve new manifests (one per file), write a new manifest list, write a new snapshot. One manifest per file is the standard pattern."
+]
+prompt.prompt = """
+An append-only commit adds twelve new data files to a table that currently has 100 manifests and 10,000 data files. Following Iceberg's default commit pattern, what new metadata files are written, and which existing metadata files are modified?
+"""
+context = "The commit's cost is proportional to the change size, not the table size. The default Iceberg pattern is one new manifest per commit listing exactly the files added in this commit. The new manifest list references all existing manifests (by path — not by rewriting them) plus the new manifest. The base manifest list itself is left untouched on disk; the new manifest list is a separate file. This is what makes commits constant-time in the table size: the existing manifests are not opened, not parsed, not modified. The other options describe O(N)-in-table-size patterns that the design specifically avoids."
+id = "77fa515e-4362-4a69-a8dd-d46fd016e23e"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The catalog provides linearizable compare-and-swap on a single piece of state (the current snapshot pointer per table). Object stores do not generally provide cross-object CAS, so the table format pushes the requirement to a transactional system (Postgres, DynamoDB, Hive Metastore, Nessie) that does."
+prompt.distractors = [
+  "The catalog stores the table's data files, replacing the object store. The object store only holds the metadata, which is small enough to be append-only.",
+  "The catalog stores the table's schema, which is too large to fit in object storage. The data and metadata live in the object store.",
+  "The catalog provides eventual-consistency replication of the metadata across regions. The object store only holds a single-region copy."
+]
+prompt.prompt = """
+Iceberg requires a catalog outside the data lake's object store. What does the catalog do that the object store cannot do?
+"""
+context = "The catalog's job is exactly two operations: `get_current_snapshot(table)` and `compare_and_swap_snapshot(table, expected_old, new)`. The CAS must be linearizable — no two concurrent writers can both succeed in moving the pointer if they both based their new snapshot on the same old snapshot. Object stores have weak atomicity primitives at the cross-object level (S3 supports per-object atomic writes but not cross-object CAS), so Iceberg pushes the CAS requirement to an external transactional catalog. Data and metadata both still live in the object store; the catalog is purely a pointer with linearizable update semantics."
+id = "5c965662-5741-408f-9965-d70a4b3dfce7"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "to_read=2"
+context = "The manifest list's per-manifest partition summary lets the reader prune manifests without opening them. The query is `WHERE region = 'us-west'`. Manifest 1's region range `['us-east', 'us-east']` does not overlap `'us-west'` — skipped. Manifest 2's range `['us-west', 'us-west']` overlaps — included. Manifest 3's range `['eu-central', 'us-west']` overlaps (`'us-west'` is within `[eu-central, us-west]`) — included. Two manifests survive the pruning. This is the first of three pruning passes (manifest list → manifest → data file → row group); the savings compound. The lexicographic string comparison is correct for the inclusive range check used here."
+prompt.program = """
+fn main() {
+    // Three manifests' partition summaries for the `region` field.
+    // Each summary is (lower_bound, upper_bound).
+    let manifests: Vec<(&str, &str)> = vec![
+        ("us-east",    "us-east"),
+        ("us-west",    "us-west"),
+        ("eu-central", "us-west"),
+    ];
+
+    // Query predicate: region == 'us-west'.
+    let target = "us-west";
+
+    // A manifest can match if [lower, upper] contains the target value.
+    let to_read = manifests
+        .iter()
+        .filter(|(lo, hi)| *lo <= target && target <= *hi)
+        .count();
+
+    print!("to_read={}", to_read);
+}
+"""
+id = "136ead7e-f905-4c16-b8bc-3f9bae2b7589"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The snapshot is immutable, but the catalog pointer to the current snapshot is mutable. Commits write new snapshot files and atomically update the catalog pointer to reference them. Old snapshots remain on disk, queryable for time travel, until snapshot expiration physically deletes them."
+prompt.distractors = [
+  "The catalog pointer is immutable; the snapshot is mutable. Commits modify the current snapshot's manifest list in place. Time travel uses a separate version-history table.",
+  "Both the snapshot and the catalog pointer are immutable. Time travel queries are not actually supported in Iceberg; only the current snapshot is queryable.",
+  "Both the snapshot and the catalog pointer are mutable. Time travel is supported via a write-ahead log that records every modification."
+]
+prompt.prompt = """
+In the Iceberg metadata model, what is mutable and what is immutable, and what does that distinction enable?
+"""
+context = "Immutability of snapshots is what makes the format work: in-flight readers, time-travel queries, and concurrent commits all rely on old snapshots remaining valid after new commits. The catalog pointer is the only mutable state — and it mutates atomically via CAS. The 'snapshot expiration' job in Module 6 is what eventually deletes old snapshot files after a retention window; until then, the snapshots accumulate on disk and are queryable. The other answers describe designs that would not support the immutable-versioned-history property that gives the format its central guarantees."
+id = "cc68bbf4-fc55-465c-b716-15de06399ce8"

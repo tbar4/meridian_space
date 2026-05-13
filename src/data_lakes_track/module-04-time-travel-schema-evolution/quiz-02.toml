@@ -1,0 +1,88 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Walk the snapshot history (a small append-only log of (snapshot_id, commit_timestamp_ms, metadata_path) triples) backward, stopping at the last entry whose timestamp <= target. The convention puts every instant in exactly one snapshot's window."
+prompt.distractors = [
+  "Issue a binary search against the catalog's per-table snapshots table indexed by commit timestamp. The catalog returns the matching snapshot ID directly.",
+  "Open each candidate snapshot file in order and check its commit_timestamp_ms field; stop at the first snapshot newer than the target and pin the previous one.",
+  "Compute the snapshot ID arithmetically as floor((target_ms - table_genesis_ms) / commit_interval_ms). The result is the snapshot ID directly without further lookups."
+]
+prompt.prompt = """
+A time-travel query specifies a target timestamp. The planner must resolve this to a snapshot ID. How does the resolution work?
+"""
+context = "The snapshot history is a small per-table metadata structure (Iceberg's metadata_log) that records every commit's timestamp and metadata path. Reading it is one bounded GET per table; walking the resulting vector is O(snapshots), which is small even for tables with hourly commits over a 30-day retention window (720 entries). The convention 'snapshot N is current from timestamp[N] to timestamp[N+1]' assigns every instant unambiguously. The other options describe alternative designs: the binary-search-in-catalog adds a database dependency for what is fundamentally a metadata lookup; opening each snapshot file is unnecessary work; the arithmetic formula assumes regular commit cadence which is rarely true in production."
+id = "281207eb-760b-4f43-91ca-8b94e46cf324"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Snapshot-time projection reads files at snapshot S projected against the schema that was current when S was committed. Current projection reads the same files against the table's current schema, filling nulls for columns added since S and dropping columns removed since."
+prompt.distractors = [
+  "Snapshot-time projection rewrites the data files to match the snapshot-time schema at query time. Current projection reads the data files as-is.",
+  "Snapshot-time projection is only supported for read-only snapshots. Current projection works for any snapshot but produces null-bloated results.",
+  "Snapshot-time projection requires the schema to be unchanged since the snapshot. Current projection works regardless of schema changes."
+]
+prompt.prompt = """
+The Mission Replay Engine supports two schema-projection modes for time-travel queries: snapshot-time and current. What is the difference?
+"""
+context = "The two projection modes differ only in which schema the reader uses for column-ID-to-target-column mapping. The data files are read identically (the same Parquet bytes are decoded the same way); the difference is the projection target. Snapshot-time projection is the right choice for accident-investigation and historical-replay workloads — the analyst wants the table as it actually looked at the time. Current projection is the right choice for current-tooling that expects today's schema; columns added later show as nulls (the data files don't have them) and columns dropped later are filtered out. The Mission Replay Engine defaults to snapshot-time. The other options describe non-existent mechanisms: data files are never rewritten at query time, and projection works for any snapshot/schema combination via column-ID matching."
+id = "c7e1f1a7-49b6-412a-89ab-4a0f689caed1"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The diff walks the snapshot chain between old and new, accumulating manifest entries whose status is Added (became part of the table during the range) or Deleted (was removed during the range). The cost is proportional to the changes in the range, not to the table's total size."
+prompt.distractors = [
+  "The diff computes a row-level hash for every row in both snapshots' file sets, then compares the hashes to identify rows that appeared or disappeared.",
+  "The diff sorts the files in both snapshots by content hash and emits the symmetric difference. This requires reading every file in both snapshots.",
+  "The diff reads only the new snapshot and infers the removals by comparing its file list to the old snapshot's file list; the inference must read all of both lists."
+]
+prompt.prompt = """
+The Change Data Feed pattern emits the added and removed rows between two snapshots. How does the diff computation avoid reading the table's full content?
+"""
+context = "Change Data Feed in the lakehouse exploits the manifest-entry status field. Each commit's new manifest entries are stamped Added; each commit's removed entries are stamped Deleted. The diff is the union of Added and Deleted entries across the snapshot range. Reading is bounded by the number of changes — typically a handful of manifests per snapshot, regardless of how big the table is. A consumer polling for changes every 30 seconds reads single-digit metadata files per poll, never opens the data files unless it wants to actually consume the changed rows. The row-level hash and content-comparison options describe approaches that would work but are O(rows) when O(changes) is achievable; the lakehouse's CDF design specifically avoids them by piggybacking on the manifest-entry status."
+id = "f0de209c-da0b-4430-92b8-8c4b4fb9811e"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "snapshot_id=300"
+context = "The resolution rule: find the last snapshot whose commit_timestamp_ms <= target_ms. Target is 250. Walking the history: snapshot 100 (timestamp 100) — keeps (100 <= 250). Snapshot 200 (timestamp 200) — keeps (200 <= 250). Snapshot 300 (timestamp 250) — keeps (250 <= 250); the convention assigns the boundary instant to the *new* snapshot. Snapshot 400 (timestamp 350) — break (350 > 250). The pinned snapshot is 300. This implements the 'snapshot N current from timestamp[N] to timestamp[N+1]' convention with the boundary going to the new snapshot."
+prompt.program = """
+fn main() {
+    // Snapshot history: (snapshot_id, commit_timestamp_ms).
+    let history: Vec<(u64, i64)> = vec![
+        (100, 100),
+        (200, 200),
+        (300, 250),
+        (400, 350),
+        (500, 500),
+    ];
+
+    let target_ms: i64 = 250;
+
+    // Find the snapshot that was current at target_ms.
+    let mut snapshot_id: u64 = 0;
+    for (id, ts) in &history {
+        if *ts <= target_ms {
+            snapshot_id = *id;
+        } else {
+            break;
+        }
+    }
+
+    print!("snapshot_id={}", snapshot_id);
+}
+"""
+id = "2590d566-ae50-4260-93f0-82a0278169e1"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Snapshots are immutable: two runs of the same time-travel query at the same snapshot ID produce identical data file reads, identical Arrow batches, and identical aggregated results. This is what makes replay-based analyses reproducible by other analysts using only the snapshot ID."
+prompt.distractors = [
+  "Snapshots are versioned with cryptographic hashes that the reader verifies on every read; any tampering produces an error, ensuring the result is the original.",
+  "Snapshots include a deterministic random-seed value that the reader uses to apply consistent sampling. Replay queries use this seed for reproducible sampling.",
+  "Snapshots record the original query's plan; replaying the same query against the same snapshot reuses the recorded plan, producing identical execution."
+]
+prompt.prompt = """
+A replay analyst is investigating an orbital anomaly. The analyst pins snapshot 4729 and runs a query that returns specific telemetry values. A different analyst runs the same query against snapshot 4729 a week later and gets exactly the same values. What structural property of the lakehouse makes this reproducibility guaranteed?
+"""
+context = "Replay determinism is a consequence of two structural properties: (1) snapshots are immutable, so the snapshot's referenced data files are the same bytes on every read; (2) the read protocol is deterministic — Parquet decoding produces the same Arrow values for the same bytes, projection is deterministic, etc. Two analysts running the same query against the same snapshot ID see identical results. This is the property that makes lakehouse replays scientifically valid: the audit team can reproduce another analyst's investigation by replaying against the same snapshot, with no way for the data underneath them to silently change. The other options describe mechanisms that exist in some systems but are not what makes lakehouse replays reproducible."
+id = "a72c342d-d02b-4436-a26e-85c93e2484e1"

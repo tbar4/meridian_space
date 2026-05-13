@@ -1,0 +1,87 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Both writers do their data and metadata work in parallel without coordination, then attempt a linearizable CAS on the catalog pointer. Exactly one CAS succeeds; the other observes the conflict and retries by re-reading the new base and rebuilding the commit on top of it."
+prompt.distractors = [
+  "Both writers acquire a table-level pessimistic lock before starting. Writer B blocks until writer A's commit completes, then proceeds.",
+  "Both writers commit in parallel. The catalog detects the conflict and merges the two commits automatically, producing a snapshot containing both writers' files.",
+  "Both writers write to disjoint metadata directories and the catalog uses two-phase commit across them to atomically apply both writers' changes."
+]
+prompt.prompt = """
+Two writers attempt to commit to the same Iceberg table simultaneously. Each has written its data files and is about to commit. How does the table format ensure exactly one writer's commit wins without blocking the other writer's data write?
+"""
+context = "Optimistic concurrency control is the protocol. Both writers do the expensive work (writing data files, writing metadata files) in parallel — no coordination, no locks. The only contended primitive is the catalog CAS, which is a millisecond-scale operation. Exactly one writer's CAS succeeds; the other sees a conflict, re-reads the new current snapshot, rebuilds its commit on top of the new base, and retries. This is the protocol DDIA describes for optimistic concurrency: do the work assuming nothing will change, check at commit time whether anything did, abort and retry if so. Pessimistic locking would hold locks for tens of seconds during the data write; automatic merging is unsafe in general (Append vs Overwrite conflict semantics differ); 2PC is overkill for the single-catalog-row CAS."
+id = "1e0571af-809f-4535-95f0-a475bb985be0"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Append-only commits don't conflict on data — the rebase just adds the previous new files to the conflicting commit's file set and retries. Overwrite commits must re-evaluate which files to rewrite against the now-current snapshot, which may produce a different rewrite plan or determine the rewrite is no longer applicable."
+prompt.distractors = [
+  "Append-only commits cost more on retry because the new manifest must be rewritten with the larger file count. Overwrite commits cost less because they reuse the same manifest.",
+  "Append-only and overwrite commits have identical retry costs; the rebase is a metadata-only operation in both cases.",
+  "Append-only commits cannot be retried automatically because the writer cannot tell whether the conflicting commit already added equivalent files. Overwrite commits retry trivially."
+]
+prompt.prompt = """
+A writer's CAS fails. The writer must rebase its commit on the new current snapshot and retry. Why does the rebase cost differ between an append-only commit and an overwrite commit?
+"""
+context = "The append-vs-overwrite distinction matters because of what the rebase has to do. An append-only commit's rebase is `take the previous new files, add them to whatever the new current snapshot is, write new metadata, CAS again` — cheap and almost always succeeds. The data files are unchanged. An overwrite commit's rebase has to re-examine the file set: a commit that was rewriting files A, B, C may discover that the conflicting commit already modified A. The rebase must decide whether the rewrite still applies (drop A, rewrite B and C), or whether the entire commit no longer makes sense and must surface to the application layer. This is DDIA's 'decisions based on outdated premise' pattern; append-only commits don't have outdated premises because they don't depend on the previous file set."
+id = "4fefc9ec-0d0e-47fe-ba6e-648fcde9a5b6"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Pessimistic locking would hold a table-wide lock for the duration of the multi-file write (tens of seconds), and crashed lock holders require a separate revocation mechanism with its own correctness concerns. Optimistic CAS keeps the contended primitive to a millisecond-scale catalog operation."
+prompt.distractors = [
+  "Pessimistic locking is incompatible with object storage because object stores don't expose lock primitives. Optimistic CAS works because the catalog provides CAS.",
+  "Pessimistic locking produces unfair scheduling under contention. Optimistic CAS gives every writer equal opportunity to commit.",
+  "Pessimistic locking requires a globally-distributed lock service. Optimistic CAS only needs the local writer's state."
+]
+prompt.prompt = """
+Why does the lakehouse community use optimistic concurrency control rather than pessimistic locking for table format commits?
+"""
+context = "Lakehouse writes are slow in absolute terms: tens of seconds for a multi-file commit's data write. A pessimistic lock held for the duration is a lock held for tens of seconds, and a crashed lock holder requires lock-revocation machinery (leases, fencing tokens — DDIA Ch. 8) to recover safely. Optimistic CAS avoids this by making the contended primitive a single CAS at the very end of the commit — milliseconds, not seconds — and by tolerating concurrent writers' parallel work. The cost of optimistic concurrency is that some writers' work is thrown away on conflict; the cost of pessimistic locking is unbounded lock-hold latency. For predominantly-append workloads against single-writer tables, optimistic is strictly better."
+id = "5c3b75cf-9480-4dbc-a1ff-ef0933d3ab48"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "winners=1 losers=1"
+context = "Compare-and-swap atomically updates the pointer if and only if its current value matches the expected value. Two writers both observe `current = 100` as the base. Writer A's CAS swaps 100 → 101: succeeds. Writer B's CAS swaps 100 → 102: when B's CAS runs, `current` is now 101 (set by A), so B's expected-100 does not match. Exactly one writer's CAS succeeds, exactly one fails. The example uses `AtomicU64::compare_exchange` which is the same primitive a transactional catalog provides at a larger scale: linearizable conditional update keyed on the expected old value."
+prompt.program = """
+use std::sync::atomic::{AtomicU64, Ordering};
+
+fn main() {
+    let current_snapshot = AtomicU64::new(100);
+
+    // Two writers, each thinking the current snapshot is 100,
+    // attempt to advance the pointer to a different new snapshot.
+    let writer_a_result = current_snapshot.compare_exchange(
+        100, 101, Ordering::SeqCst, Ordering::SeqCst,
+    );
+    let writer_b_result = current_snapshot.compare_exchange(
+        100, 102, Ordering::SeqCst, Ordering::SeqCst,
+    );
+
+    // Exactly one writer's CAS should succeed (returns Ok),
+    // the other should fail (returns Err with the actual current value).
+    let winners = [&writer_a_result, &writer_b_result]
+        .iter().filter(|r| r.is_ok()).count();
+    let losers = [&writer_a_result, &writer_b_result]
+        .iter().filter(|r| r.is_err()).count();
+
+    print!("winners={} losers={}", winners, losers);
+}
+"""
+id = "151d20de-f442-4456-9178-b920c28ed08a"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Sustained conflict rates indicate that multiple writers are racing against the same table. The interventions are to batch writes per writer (fewer commits per second), shard the table by some natural partition key (one table per shard, one writer per table), or consolidate writers into a single committer service that serializes incoming commits."
+prompt.distractors = [
+  "Sustained conflict rates indicate the catalog is overloaded. The intervention is to scale the catalog horizontally.",
+  "Sustained conflict rates indicate the metadata writes are too slow. The intervention is to switch from Avro to JSON for manifest serialization.",
+  "Sustained conflict rates indicate the data files are too large. The intervention is to reduce the row group size to make per-file writes faster."
+]
+prompt.prompt = """
+The Artemis observability stack alerts on a sustained commit_conflict_total rate of 5 conflicts/second on a table that previously had near-zero conflicts. What does this rate indicate, and what are the available interventions?
+"""
+context = "Conflict rate is bounded by linearizable-CAS rate, which is a fundamental constraint of the protocol — not a bug to scale around. Sustained conflicts are an architectural signal: multiple writers are sharing a single table identity when the workload would be better served by multiple tables, batching, or single-writer consolidation. Catalog throughput is rarely the limit (Postgres handles thousands of CAS per second easily); metadata serialization format is irrelevant; data file size doesn't affect the metadata commit rate. The right response is at the workload-design level, not the implementation level."
+id = "01c8e931-22fd-41f4-a5ed-5ee9d9abe9a5"

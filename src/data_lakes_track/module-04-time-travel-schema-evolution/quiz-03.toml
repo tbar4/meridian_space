@@ -1,0 +1,95 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Every column has a stable numeric field_id allocated at column creation. Renames change only the display name; the field_id is unchanged, so existing data files (which reference columns by field_id) continue to be read correctly. No data is rewritten."
+prompt.distractors = [
+  "Rename operations trigger a background rewrite of every data file under the new schema. The rewrite runs over hours to days; queries see partial results during the migration.",
+  "The table maintains a name-translation table mapping old names to new names. Queries against either name go through the translation table at planning time.",
+  "Renames are blocked by the table format and require explicit migration via a DROP COLUMN + ADD COLUMN sequence with data backfill."
+]
+prompt.prompt = """
+A long-lived table has a column named `voltage`. The operations team wants to rename it to `panel_voltage`. The table has 50 TB of existing data. How does the rename work in an Iceberg-style table format?
+"""
+context = "Column IDs are the central decoupling primitive for schema evolution. The schema records (field_id, name, type, required) per column; data files reference columns by field_id in their Parquet footer (via the field_id annotation). Renaming a column changes only the schema's display name; the field_id is unchanged, so existing data files continue to be read by ID matching. No rewrite, no migration, no compatibility window. The DDIA-equivalent framing is 'physical identity decoupled from display name' — the same principle that lets Protocol Buffers and Avro evolve schemas without breaking existing data. The other options describe heavier-weight mechanisms (rewrite, translation table, mandatory migration) that the design specifically avoids."
+id = "cd46b703-74d0-471e-b5f6-2de808692dca"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Adding a nullable column is a pure metadata change: the schema gets a new column with a new field_id; the data files are not touched; existing rows have no value for the column (back-filled as null at read time). Making a non-nullable column requires every existing row to have a value, which the data files don't have without an explicit migration."
+prompt.distractors = [
+  "Nullable columns are stored more efficiently because they don't need the validity bitmap; non-nullable columns require additional space. The performance difference is the reason for the constraint.",
+  "Non-nullable columns require type validation at every write; nullable columns can be added without changing the writer. The constraint is about writer complexity.",
+  "Nullable columns are added in a separate manifest from non-nullable columns; the table format doesn't have machinery to merge these manifests during reads."
+]
+prompt.prompt = """
+The Iceberg spec allows ADD COLUMN to add a nullable column to an existing table without rewriting data files. But it does not allow ADD COLUMN to add a non-nullable column. Why is the nullability constraint structurally necessary?
+"""
+context = "The constraint comes from the existing-rows-have-no-value problem. A nullable column lets existing rows have null for the new column; the data files don't contain a value, and the reader fills null at projection time. A non-nullable column would require every existing row to have a non-null value — but the data files don't, and there's no value the writer could supply. The only way to add a non-nullable column safely is to rewrite every data file to include the value, which is an explicit migration with potentially significant cost. The Iceberg spec consequently restricts ADD COLUMN to nullable columns at the metadata layer. The other options describe properties (validity bitmap, writer complexity, manifest merging) that aren't the actual reason for the restriction."
+id = "3879feaa-460a-4461-bccf-c81acd140723"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Each snapshot records the partition_spec_id under which its data files were committed. The planner applies the correct spec per manifest, lifting source predicates through each spec's transforms independently. Old data continues to be queryable under the old spec; new data uses the new spec; migrations are gradual."
+prompt.distractors = [
+  "The first query after a spec change triggers a full table rewrite under the new spec. Subsequent queries hit the rewritten data.",
+  "Spec changes require all queries to be paused while the metadata is updated to map old partitions to new partitions. The pause is brief but globally visible.",
+  "Spec changes are forbidden on tables with existing data; the only way to evolve the partition spec is to create a new table and migrate the data manually."
+]
+prompt.prompt = """
+The Artemis SDA table started with `partition by (mission_id)` six months ago and switched to `partition by (mission_id, day(ts))` last month. How does the planner handle a query that spans both pre- and post-migration data?
+"""
+context = "Partition spec evolution follows the same per-snapshot pattern as schema evolution. Each snapshot records its partition_spec_id; the table metadata's partition_specs vector holds every spec the table has had; the planner consults each manifest's spec when planning the read. Old manifests (and the data files they reference) continue to be queryable under their original spec; new manifests use the new spec. The two coexist in the same query plan; the planner handles the mixed case without conflict. Migration to a new spec is an explicit and gradual operation (Module 6 compaction) — not a mandatory all-at-once rewrite. The other options describe designs that would work but are heavier than the actual implementation."
+id = "2a3891f9-429a-4e85-a24a-d6ddc2184d7d"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "from_file=2 null_filled=1"
+context = "The projection is keyed on field_id, not name. Target schema has three fields: 1 (panel_voltage), 2 (temperature_c), 4 (sensor_kind). The data file has fields 1 (under the old name 'voltage'), 2 (under 'temp_c'), and 3 (a dropped column 'pressure_kpa'). For target field 1: file has field_id 1 → FromFile. For target field 2: file has field_id 2 → FromFile. For target field 4: file does NOT have field_id 4 → Null-fill (the column was added after the file was written). The renames (voltage → panel_voltage, temp_c → temperature_c) are transparent — the field IDs match. Two columns come from the file; one is null-filled."
+prompt.program = """
+use std::collections::HashMap;
+
+fn main() {
+    // Target schema: field_id -> display_name.
+    let target_schema: Vec<(u32, &str)> = vec![
+        (1, "panel_voltage"),
+        (2, "temperature_c"),
+        (4, "sensor_kind"),
+    ];
+
+    // File schema: field_id -> display_name (older names, with one column
+    // that was dropped from the target and missing the newer 'sensor_kind').
+    let file_schema: HashMap<u32, &str> = vec![
+        (1, "voltage"),
+        (2, "temp_c"),
+        (3, "pressure_kpa"),
+    ].into_iter().collect();
+
+    // For each target field, decide whether to read from file or null-fill.
+    let mut from_file = 0;
+    let mut null_filled = 0;
+    for (id, _name) in &target_schema {
+        if file_schema.contains_key(id) {
+            from_file += 1;
+        } else {
+            null_filled += 1;
+        }
+    }
+
+    print!("from_file={} null_filled={}", from_file, null_filled);
+}
+"""
+id = "52324687-6a03-44a0-8b09-f8a84e094660"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Schema changes are commits with the same CAS-and-retry protocol as data commits. They appear in the snapshot history with timestamps and metadata paths, making the audit trail automatic. Rollbacks are forward commits that undo a prior change; there is no separate 'ALTER TABLE UNDO' primitive."
+prompt.distractors = [
+  "Schema changes bypass the CAS protocol because they are metadata-only. They are committed via a separate DDL pipeline that acquires a table-wide write lock.",
+  "Schema changes are not transactional: they are best-effort and may be partially applied if the metadata write fails. The audit trail is reconstructed from external logs.",
+  "Schema changes require coordinator approval before being committed. The coordinator serializes all schema changes globally to prevent conflicting modifications."
+]
+prompt.prompt = """
+A schema change adds a new nullable column to a table. What is the commit protocol for the change, and how is it observable in the table's history?
+"""
+context = "Schema changes are first-class commits in the lakehouse model: a schema change produces a new snapshot whose data is unchanged from the parent but whose schema_id is new; the new snapshot is committed via the standard optimistic-CAS protocol; conflicts (someone else committed concurrently) are handled by retry. The unified commit model has two important consequences: (1) the audit trail is automatic — every schema change has a timestamp, a metadata path, a snapshot ID, and is visible in the snapshot history; (2) rollbacks are forward commits — to undo a schema change, commit a new schema-change snapshot that reverts the prior change. The other options describe heavyweight DDL mechanisms (locks, coordinators, separate pipelines) that the lakehouse doesn't have because it doesn't need them."
+id = "14607457-0990-4b17-a8d4-2c665be298ff"

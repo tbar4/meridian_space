@@ -1,0 +1,81 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Three sequential passes: prune manifests by manifest-list partition summary, then prune data files by per-file statistics in the surviving manifests, then prune row groups inside each surviving data file using the Parquet footer's per-column-chunk statistics."
+prompt.distractors = [
+  "One pass: read every manifest in the snapshot, apply the predicate to every data file's statistics, return the surviving files. The Parquet reader reads them whole.",
+  "Two passes: read every manifest, build an in-memory index of all data files with their statistics, then apply the predicate to the index. Pruning happens at the index level.",
+  "Four passes: catalog → snapshot → manifest list → manifests → data files. The catalog itself participates in pruning by maintaining per-table value indices."
+]
+prompt.prompt = """
+The Artemis read planner takes a query predicate and produces a list of (file, row_groups) tuples to scan. What is the structure of this planning, level by level?
+"""
+context = "The pruning pyramid is three passes because there are three levels of metadata where statistics are available at progressively finer granularity. Manifest-list summaries enable coarse partition-level pruning without reading manifests. Manifest entries enable per-file pruning without reading data files. Parquet footers enable per-row-group pruning without reading row group data pages. The compounding is what makes the format scale: 4000 manifests → 10 manifests (Pass 1) → 50 files (Pass 2) → 80 row groups (Pass 3) is a typical Artemis read plan. The catalog does not participate in pruning; its job is exactly the CAS, not predicate evaluation."
+id = "f9b99083-c4d2-4701-bc3e-03d253c9a834"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The pruning function must be conservative: it returns false only when the predicate is proven not to match the data the statistics describe. False positives (read a file that doesn't match) cost extra I/O; false negatives (skip a file that does match) produce silently-wrong query results. The asymmetry is built into every pruning rule."
+prompt.distractors = [
+  "The pruning function must be symmetric: false positives and false negatives are equally costly, so the function returns true exactly when the predicate matches.",
+  "The pruning function must be tight: false positives are unacceptable because they cost CPU, while false negatives are tolerable because the missing data is rare.",
+  "The pruning function is allowed to return either polarity arbitrarily; the planner handles inconsistency at a higher level by reading every file and checking the predicate on the actual data."
+]
+prompt.prompt = """
+A pruning function takes a predicate and a statistics record and returns a boolean: 'might this data match?' Why is conservative-return-true the safe default when the algebra is uncertain?
+"""
+context = "Pruning correctness is the one place in the lakehouse where the asymmetry between false positives and false negatives is starkly relevant. A false positive — reading a file that doesn't contain matching rows — costs extra I/O and CPU; the row-level predicate evaluation filters out the non-matching rows after reading, and the query result is still correct. A false negative — skipping a file that does contain matching rows — silently drops data from the result; the analyst sees a wrong answer with no error and no warning. The discipline 'be conservative' is the only correctness-preserving choice, and every leaf pruning rule (the bucket-with-range case is the textbook example) must default to 'might match' when the algebra doesn't admit a tight answer."
+id = "ac84157b-bd87-45f8-973f-0786707ce3b0"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Bucket hashing destroys order: two source values close in their natural ordering may hash to different buckets. The planner cannot translate `column > value` into a partition predicate because every bucket is potentially matching. The fix is either to query bucket-partitioned columns with equality only, or to change the partition strategy to a transform that preserves order."
+prompt.distractors = [
+  "Bucket-transformed columns are stored without statistics in the manifest, so the planner has no information to prune with. The fix is to add per-bucket statistics manually.",
+  "The bucket transform's hash function (Murmur3) is too slow to evaluate at planning time. The planner skips bucket-pruning to keep planning fast.",
+  "Range queries on bucket-partitioned columns are syntactically rejected by the query parser. The fix is to use the underlying column name (without the bucket transform) in the predicate."
+]
+prompt.prompt = """
+A table is bucket-partitioned on `payload_id` with N=16. A query writes `WHERE payload_id > 'p-005'`. The planner returns all 16 buckets as 'might match', defeating the pruning. Why?
+"""
+context = "The bucket transform produces a partition value via hashing, which is by design a one-way operation that scatters input order. A range predicate on the source column ('voltage > 28') cannot lift through the hash because the bucket containing matching values could be any bucket — the hash function does not preserve `<` or `>` relationships. This is the structural reason bucket partitioning is correct only for equality-queried columns. The Iceberg spec records this in the transform definition; the planner respects it by falling back to 'all buckets might match' for non-equality predicates, which defeats pruning on this partition column. The capstone's correctness tests must exercise this case explicitly."
+id = "4e79e404-9179-45d9-b35c-79bbc1c9e49c"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "kept=3 pruned=2"
+context = "The predicate is `value > 50`. A file's statistics `(min, max)` prune the file when `max <= 50` (no value in the file is strictly greater than 50). File 1: max=45, pruned. File 2: max=60, kept (max > 50). File 3: max=50, pruned (max not strictly greater than 50). File 4: max=100, kept. File 5: max=70, kept. Three files survive; two are pruned. The conservative rule for `>` is `max > value`; the strict inequality matters for the boundary file (max=50). This is the leaf pruning rule from the lesson's statistics algebra applied to a concrete case."
+prompt.program = """
+fn main() {
+    // Five files, each with (min, max) statistics on a numeric column.
+    let files: Vec<(i64, i64)> = vec![
+        (10, 45),    // file 1
+        (20, 60),    // file 2
+        (40, 50),    // file 3
+        (60, 100),   // file 4
+        (50, 70),    // file 5
+    ];
+
+    // Predicate: value > 50. A file might match only if max > 50.
+    let threshold = 50;
+    let kept: usize = files.iter().filter(|(_, max)| *max > threshold).count();
+    let pruned = files.len() - kept;
+
+    print!("kept={} pruned={}", kept, pruned);
+}
+"""
+id = "e9d2c60f-f578-46fc-841e-c5a9b02f5710"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The pruning summary reports the manifests/files/row-groups kept versus the total at each pass. Low ratios on frequent queries indicate the partition or clustering strategy is misaligned with the workload — typically because the workload has shifted or because the query missed an opportunity to use a partition column. The fix is to re-evaluate the partition spec or surface the inefficient query for analyst review."
+prompt.distractors = [
+  "The pruning summary reports the average byte size of files in the table; large averages indicate compaction is needed. The fix is to run the compaction job more often.",
+  "The pruning summary reports the per-query CPU time spent in the planner; high values indicate the planner is the bottleneck. The fix is to cache plans across similar queries.",
+  "The pruning summary reports the dictionary-fallback events during reads; high values indicate the column statistics are unreliable. The fix is to disable dictionary encoding on those columns."
+]
+prompt.prompt = """
+The Artemis observability stack tracks a 'pruning summary' per query, including the files-scanned / files-total ratio. A particular daily query consistently shows a ratio of 0.95. What does this indicate and how is it addressed?
+"""
+context = "The pruning summary is a workload-design instrument, not a low-level diagnostic. A query that reads 95% of the table when its predicates should select 1% is the operational signal that the partition strategy is wrong for this query — either the analyst missed a partition column they should have used, or the table's partition spec doesn't match the workload's actual query patterns. The fix lives at the architecture level: change the partition spec, change the clustering, change how the query is written. The Artemis observability stack alerts on sustained low-pruning queries; the response is a partition-spec review, not a performance tuning exercise. The distractors describe diagnostics that exist (file size, planner CPU, dictionary events) but answer different questions."
+id = "6a414a7d-6ee1-4479-b9ab-aa26338e97e8"

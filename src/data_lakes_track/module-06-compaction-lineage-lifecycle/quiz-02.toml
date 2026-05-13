@@ -1,0 +1,96 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "A snapshot is reachable if it is the current snapshot, within the retention window, or explicitly tagged for permanent retention. A data file is reachable if any reachable snapshot's manifests reference it. Expiration deletes everything unreachable."
+prompt.distractors = [
+  "A snapshot is reachable if any analyst has queried it in the last 30 days. The query log determines reachability; snapshots never queried can be deleted regardless of age.",
+  "A snapshot is reachable if it is referenced by the catalog row. Only the current snapshot is reachable; everything older is expired.",
+  "A snapshot is reachable if it has not been explicitly marked for deletion by an operator. Deletion is opt-in; the default is to retain everything forever."
+]
+prompt.prompt = """
+The Artemis archive's snapshot-expiration job needs to decide which snapshots and data files are eligible for deletion. What are the rules for reachability?
+"""
+context = "The reachability rules are union of three sources: the current snapshot (always reachable), snapshots within the retention window (the 30-day reach for Artemis), and explicitly-tagged snapshots (the audit-trail exception). The retention window is the dominant criterion in normal operation. Data files are reachable transitively: any reachable snapshot's manifests are reachable; any file referenced by a reachable manifest is reachable. The expiration deletes the complement. The other options describe different policies that wouldn't satisfy the operational requirements: query-log-based reachability is too unpredictable (operations rely on consistent retention behavior); current-snapshot-only forbids time travel; opt-in deletion never reclaims storage automatically."
+id = "5f00d4c7-a633-4b23-89b8-fbc60077da75"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Two-phase deletion: Phase 1 is a metadata commit that removes the file from the new snapshot's manifest; Phase 2 is the physical deletion that runs after a grace period long enough that no reader could still be using a pre-Phase-1 snapshot. The retention window IS the grace period."
+prompt.distractors = [
+  "The expiration job acquires a global read lock on all in-flight queries before deleting any file. Queries that started before the lock complete before the delete; queries that start after wait until the delete completes.",
+  "The expiration job consults a reference count for each file: every active query increments the count for the files it pinned; the expiration only deletes files whose count is zero.",
+  "The expiration job sends a 'file will be deleted' message to all active query workers; workers acknowledge and finish their reads of the file before the delete proceeds."
+]
+prompt.prompt = """
+A snapshot expiration removes files that may still be referenced by in-flight queries. What is the discipline that prevents these deletes from breaking active queries?
+"""
+context = "Two-phase deletion is the standard discipline. Phase 1 (the metadata commit) is the visibility change: the new snapshot's manifest no longer references the file; readers starting after the commit don't see it. Phase 2 (the physical delete) is the storage reclamation: it runs after enough time has passed that no in-flight query can still be using the file. The retention window is the grace period — the maximum time between when a snapshot stops being current and when its referenced files can be physically deleted. This is the same discipline databases use for MVCC garbage collection (DDIA Ch. 7): immediate metadata-level decommissioning, deferred physical deletion. The other options describe heavier mechanisms (locks, reference counts, IPC with workers) that the lakehouse doesn't need because the retention window does the work."
+id = "979aebf6-a759-4778-aa0c-c384c07e1435"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Copy the snapshot's data and metadata files to a cheaper storage tier (S3 Glacier IR or Deep Archive) before deleting from the live tier. The cold tier maintains its own catalog as a read-only Iceberg table; audit and accident-investigation queries route to it through a separate read path."
+prompt.distractors = [
+  "Compress the snapshot's data files further using a slower but higher-ratio codec (zstd-22 vs zstd-3), then leave them in the live tier under a different prefix. The cost reduction comes from smaller files.",
+  "Convert the snapshot's data files to a row-oriented format (Avro or JSON) before archiving. Row formats compress better for cold-storage scenarios.",
+  "Move the snapshot's metadata to the catalog database (as inline JSON in additional columns) and delete the metadata files from the object store. The data files remain in the live tier under their original paths."
+]
+prompt.prompt = """
+The Artemis archive runs a 30-day live tier and needs to support 7-year retention for audit purposes. How does the storage-tier handoff pattern work?
+"""
+context = "The storage-tier handoff is the standard pattern for long-retention archives. The cheaper tier (S3 Glacier Instant Retrieval or Deep Archive) is roughly 1/3 the cost per GB-month of S3 Standard; for the multi-year retention needed for audit and accident-investigation, this is a substantial saving. The cold tier maintains its own catalog (a separate Iceberg table whose snapshots are the live-tier's expired snapshots); audit queries go through this separate read path. The cold-tier catalog is read-only, simpler than the live-tier catalog. The other options describe approaches that wouldn't deliver the cost savings or would break the audit-query path (re-compressing doesn't change tier costs; converting to row format breaks the lakehouse contract; moving metadata to the catalog DB breaks the format's metadata model)."
+id = "bcdcab6e-6fe9-4c9a-a98b-a3211a2a017e"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "reachable=3 expired=2"
+context = "The reachability rule: a snapshot is reachable if it is the current snapshot OR within the retention window OR tagged. Snapshot 100 (current_time - 5 days, current) — reachable (within 30-day window). Snapshot 200 (current_time - 10 days) — reachable (within window). Snapshot 300 (current_time - 35 days, NOT tagged) — NOT reachable (outside window, not tagged). Snapshot 400 (current_time - 100 days, tagged) — reachable (tagged for permanent retention). Snapshot 500 (current_time - 200 days, NOT tagged) — NOT reachable. Reachable count: 100, 200, 400 = 3. Expired: 300, 500 = 2."
+prompt.program = """
+use std::collections::HashSet;
+
+fn main() {
+    let current_time_ms: i64 = 1_700_000_000_000; // arbitrary "now"
+    let retention_window_ms: i64 = 30 * 24 * 3600 * 1000; // 30 days
+
+    // Snapshot history: (snapshot_id, commit_timestamp_ms).
+    let history: Vec<(u64, i64)> = vec![
+        (100, current_time_ms - 5  * 24 * 3600 * 1000),   // 5 days ago — within window
+        (200, current_time_ms - 10 * 24 * 3600 * 1000),   // 10 days ago — within window
+        (300, current_time_ms - 35 * 24 * 3600 * 1000),   // 35 days ago — outside window
+        (400, current_time_ms - 100* 24 * 3600 * 1000),   // 100 days ago — tagged
+        (500, current_time_ms - 200* 24 * 3600 * 1000),   // 200 days ago — neither
+    ];
+
+    // Snapshots tagged for permanent retention.
+    let tagged: HashSet<u64> = vec![400u64].into_iter().collect();
+
+    // Apply reachability: within window OR tagged.
+    let mut reachable = 0u32;
+    let mut expired = 0u32;
+    for (id, ts) in &history {
+        let age = current_time_ms - ts;
+        if age < retention_window_ms || tagged.contains(id) {
+            reachable += 1;
+        } else {
+            expired += 1;
+        }
+    }
+
+    print!("reachable={} expired={}", reachable, expired);
+}
+"""
+id = "c207a851-e104-4591-9c87-819f71c4ad09"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Tagged snapshots are exempt from the standard retention-window expiration. The expiration's reachability calculation treats them as reachable; their data files and metadata remain on disk indefinitely. The tag is also a named bookmark for queries (SELECT ... FOR TAG 'name')."
+prompt.distractors = [
+  "Tagged snapshots are mirrored to a backup region; the tag indicates which backup location holds the copy. The standard expiration runs against the local copy normally.",
+  "Tagged snapshots are compressed more aggressively (zstd-22 instead of zstd-3) at tag time. The compression saving offsets the longer retention cost.",
+  "Tagged snapshots are converted to a different table format (Delta Lake or Hudi) for cross-system compatibility. The tag indicates the target format."
+]
+prompt.prompt = """
+The Artemis archive uses Iceberg tags to preserve specific snapshots (e.g., snapshots from before significant orbital incidents) indefinitely, beyond the standard 30-day retention. How do tags interact with the expiration job?
+"""
+context = "Iceberg tags are the audit exception to standard retention. The reachability calculation explicitly includes tagged snapshots; the expiration job preserves them indefinitely (or until the tag is removed). This handles the audit and regulatory cases without complicating the standard expiration logic. Tags also serve as named bookmarks: queries can reference a tag by name rather than by snapshot ID or timestamp, which is useful for incident response (the operator tags the pre-incident snapshot, analysts reference it by name). The other options describe mechanisms that exist in some systems but are not what Iceberg tags do."
+id = "a487fb56-fdf5-4b38-93b4-78c7203d0346"

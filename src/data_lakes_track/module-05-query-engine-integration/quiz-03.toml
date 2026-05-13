@@ -1,0 +1,84 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Linearizable compare-and-swap on a single piece of state per table (the current snapshot pointer), exposed through a small discovery API (list_namespaces, list_tables, load_table). Every backend implements the same interface; backends differ in implementation, deployment, and operational properties."
+prompt.distractors = [
+  "Storage of all table metadata — schemas, partition specs, manifest lists, data file lists — in a transactional database. The catalog is the primary metadata store; the object store holds only the raw data.",
+  "Eventual-consistency replication of table state across regions. The catalog's job is geo-distribution; the lakehouse format relies on convergence over time.",
+  "Per-query authorization and access control. The catalog evaluates each query's permissions and emits an allow/deny decision before any read planning happens."
+]
+prompt.prompt = """
+The lakehouse catalog has a remarkably small surface area. What is the actual contract every catalog backend implements?
+"""
+context = "The catalog's contract is small. Writers need linearizable CAS on the per-table snapshot pointer (Module 2 Lesson 3); query engines need discovery (list namespaces, list tables, load metadata). Everything else — schemas, partition specs, manifest lists, data file lists — lives in the snapshot metadata in the object store, not in the catalog. This minimal-contract design is what makes backend swapping operational: any system that provides linearizable single-key CAS plus a list-of-tables query can implement the catalog interface. Authorization and replication can be layered on top of the catalog by the deployment, but they aren't part of the format's contract."
+id = "3aeaca97-3fc9-4642-be81-e657e37f3086"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Nessie provides first-class branching and multi-table atomic transactions, modeled on Git. Workloads that need experimental branches off production tables, or that need to update multiple related tables atomically, justify Nessie's operational overhead. Single-writer append-only workloads do not."
+prompt.distractors = [
+  "Nessie provides eventual consistency across regions; the others require strict linearizability. Multi-region deployments use Nessie; single-region deployments don't.",
+  "Nessie provides hot-failover with no downtime; the other backends require coordinated failover with brief read pauses. High-availability workloads use Nessie.",
+  "Nessie provides better performance for high-concurrency commits; the others bottleneck at the CAS rate. High-throughput workloads use Nessie."
+]
+prompt.prompt = """
+A team is choosing a catalog backend. They are considering Nessie. What workload pattern justifies Nessie's operational overhead over the simpler alternatives?
+"""
+context = "Nessie's distinctive property is Git-flavored branching and merging plus multi-table atomic transactions. A branch lets analysts work on a copy of production data without affecting main; merging applies the branch's commits onto main with conflict resolution. Multi-table transactions let a commit update several related tables atomically — readers see either the pre-commit or post-commit state, never an in-progress mix. Both capabilities are valuable for workloads that involve experimental work on shared data or coordinated changes across tables. The Artemis cold archive has neither pattern (single writer, append-only ingest, no cross-table dependencies), so Nessie's overhead isn't justified. The other distractors describe properties Nessie does or does not have, but they aren't the distinctive ones — the other backends also support multi-region (with replicated DBs), are hot-failoverable (with standby instances), and have similar CAS-rate ceilings."
+id = "d96d41bb-9928-4b08-af33-ec42a9af7c93"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Postgres-JDBC. The Artemis cold archive is single-region, single-writer per table, with an existing Postgres available on the ground-segment infrastructure. The catalog overhead is essentially zero — adding a few tables to an existing database — and the operational profile matches Postgres's strengths."
+prompt.distractors = [
+  "REST catalog. The HTTP-native interface makes it the most flexible long-term; the team should standardize on it even if they don't need its multi-tenant features yet.",
+  "Hive Metastore. The Hadoop-era tooling is well-supported; even though the team doesn't use Hive, the Metastore is the safest default.",
+  "Nessie. The Git-like branching may be useful for future workflows; choosing it preemptively avoids a migration later."
+]
+prompt.prompt = """
+The Artemis cold archive team chose Postgres-JDBC over REST, Hive Metastore, and Nessie. The team has 1 ingestion writer per table, an existing Postgres deployment, and a single-region operational profile. What's the principled justification for the choice?
+"""
+context = "The right catalog choice is the one that fits the actual operational profile. The Artemis archive: single-region, single-writer ingest per table, append-only data, no need for branching, an existing Postgres deployment. Postgres-JDBC matches this exactly — zero new infrastructure, well-understood semantics, sufficient throughput for the workload. The REST catalog would be the right choice if the deployment grew to multiple writers across languages, but choosing it preemptively adds an extra service to operate for no current benefit. Hive Metastore is for migration scenarios; Nessie is for branching scenarios; both are wrong here. The principle: pick the simplest backend that fits today's workload, with an eye on the migration path if the workload changes."
+id = "a25028f1-a453-49a3-9041-8da1e3d58f7b"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "namespaces=3 tables_in_ns=2"
+context = "The catalog discovery API: list_namespaces returns the set of namespaces in the catalog; list_tables(namespace) returns the tables within one namespace. The example simulates a small catalog with three namespaces (artemis.sda, artemis.engineering, artemis.payload) and two tables in the artemis.sda namespace (observations, fused_tracks). The HashMap-from-iter pattern collects the namespaces' string vec into a set; the per-namespace query filters tables by their owning namespace. Both functions return the kind of bounded, sub-millisecond responses that real catalog backends produce; the abstraction works the same way across REST, Postgres-JDBC, Hive Metastore, and Nessie."
+prompt.program = """
+use std::collections::HashSet;
+
+fn main() {
+    // Simulate the catalog's known (namespace, table) pairs.
+    let catalog: Vec<(&str, &str)> = vec![
+        ("artemis.sda",         "observations"),
+        ("artemis.sda",         "fused_tracks"),
+        ("artemis.engineering", "telemetry"),
+        ("artemis.payload",     "config"),
+    ];
+
+    // list_namespaces: distinct namespace strings in the catalog.
+    let namespaces: HashSet<&str> = catalog.iter().map(|(ns, _)| *ns).collect();
+
+    // list_tables('artemis.sda'): tables whose namespace == 'artemis.sda'.
+    let target_ns = "artemis.sda";
+    let tables_in_ns = catalog.iter().filter(|(ns, _)| *ns == target_ns).count();
+
+    print!("namespaces={} tables_in_ns={}", namespaces.len(), tables_in_ns);
+}
+"""
+id = "a3cff2c5-298e-48f8-9885-99bdf2c06f86"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Linearizability of the CAS: no two concurrent writers can both successfully advance the same table's snapshot pointer. The lakehouse format depends on this property; without it, two writers can both observe the same base, both commit, and produce inconsistent table states. Stale-read tolerance is a related but separate concern."
+prompt.distractors = [
+  "Eventual consistency: all writers' commits eventually converge to a consistent ordering, even if intermediate reads see inconsistent states. The lakehouse can tolerate brief inconsistency during convergence.",
+  "Read-your-writes consistency: a writer that just committed sees its own commit on subsequent reads. The catalog must guarantee this for the optimistic-retry loop to work.",
+  "Bounded staleness: reads see a state at most N milliseconds out of date. The catalog's read latency is bounded by this property."
+]
+prompt.prompt = """
+Across all four catalog backends (REST, Hive Metastore, Nessie, Postgres-JDBC), the lakehouse format requires a specific consistency property. What is it, and why is it load-bearing for correctness?
+"""
+context = "Linearizable CAS is the load-bearing property of the catalog's contract. Two concurrent writers each based their commit on the same base snapshot; both call compare_and_swap with the same expected_old. Linearizability guarantees that exactly one succeeds and the other observes the updated state; the failed writer then rebases and retries (Module 2 Lesson 3's optimistic-concurrency protocol). Without linearizable CAS, both writers could observe the same expected_old, both succeed in their writes, and the catalog would have a non-serializable history of conflicting changes — the optimistic retry loop's correctness argument breaks down. Eventual consistency, read-your-writes, and bounded staleness are related properties but are not the load-bearing one; the lakehouse format works fine with stale reads (within a reasonable bound) but fails completely without linearizable CAS."
+id = "01f6d662-cf41-4992-b092-1f7a6189fcc6"

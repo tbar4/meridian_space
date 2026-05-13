@@ -1,0 +1,80 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Arrow's columnar layout is uncompressed and laid out for direct CPU access; converting Parquet's encoded, compressed pages into Arrow buffers is the per-read decode cost the in-memory format pays for."
+prompt.distractors = [
+  "Arrow files are smaller than Parquet files for the same data, so writing Parquet directly avoids the storage cost of intermediate Arrow files.",
+  "Arrow files cannot store schemas, so Parquet is required whenever the data's schema must be preserved on disk.",
+  "Arrow's IPC format is incompatible with object storage; Parquet must be used for any data persisted beyond a single process's lifetime."
+]
+prompt.prompt = """
+The Artemis cold archive stores data as Parquet, but the in-memory representation that compute kernels operate on is Apache Arrow. Why use two different columnar formats — one on disk and one in memory — rather than reading and writing Arrow directly to the archive?
+"""
+context = "Arrow optimizes for random-access analytical processing in memory. Parquet optimizes for size on disk and column-projected reads. The bytes on disk in a Parquet file are encoded and compressed; the bytes in memory in an Arrow array are uncompressed, padded for alignment, and laid out for the CPU's vector instructions to scan directly. The cold archive uses Parquet because storage cost dominates; the in-memory side uses Arrow because access speed dominates. The boundary between them is the per-read decompress-and-decode work."
+id = "545beb1f-f59b-4a4a-9a0a-3c01860a5c72"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The clone is cheap: `RecordBatch` is `Clone` and cloning it increments `Arc` refcounts on the underlying arrays without copying the value buffers."
+prompt.distractors = [
+  "The clone is expensive: every column's values are copied into a fresh allocation owned by the cloned batch.",
+  "The clone is cheap, but only if the batch was constructed without nullable columns; the validity bitmap copy is the dominant cost.",
+  "The clone fails with a borrow-checker error: `RecordBatch` is not `Clone` because its underlying buffers are not `Send`."
+]
+prompt.prompt = """
+A pipeline stage receives an Arrow `RecordBatch` of 8192 rows × 40 columns from upstream. The stage needs to retain the batch for retry while also forwarding it downstream. The code calls `batch.clone()`. What is the cost of the clone?
+"""
+context = "Arrow's buffer-based layout makes record batches inexpensive to clone. The arrays inside a `RecordBatch` are held behind `Arc`, and cloning the batch increments the `Arc` refcounts on each column rather than copying the underlying buffers. This is the in-memory side of Arrow's zero-copy promise — passing record batches around the pipeline (fan-out, broadcast, retained for retries) is a pointer-copy operation, not a data-copy operation. The cost is constant in the array size."
+id = "4d221f92-294d-4750-ba22-e413ce3f1a3e"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The reader's previously-obtained record batches reference memory in the now-truncated mmap; accessing them may produce a SIGBUS signal."
+prompt.distractors = [
+  "Rust's borrow checker statically prevents the truncation while the mmap is held, so the scenario is impossible.",
+  "The kernel detects the file modification and refreshes the mmap automatically; subsequent reads return the new contents.",
+  "Memory-mapped reads always copy into a private buffer at mmap time, so the truncation has no effect on already-mapped pages."
+]
+prompt.prompt = """
+The Artemis hot-cache server memory-maps Arrow IPC files from a local SSD. A separate process truncates one of the mapped files while a query is in flight against it. What happens to the reader's already-obtained record batches?
+"""
+context = "Memory mapping is not safe in the Rust sense — the `unsafe` block at the `Mmap::map` site exists precisely because the compiler cannot prevent another process from truncating or unlinking the underlying file. When the truncation happens, reads from the mmap of the no-longer-present pages produce SIGBUS. The Artemis cache server addresses this by making cache files immutable: new versions are written to new paths and the cache index updated atomically. The cache discipline is what makes the `unsafe` usage tractable; the language alone cannot."
+id = "4ef49506-3382-410d-afee-b2e8ad4625aa"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "valid[3]=true valid[5]=false"
+context = "Arrow stores nullability as a validity bitmap: one bit per row, 1 = valid, 0 = null, packed 8 bits per byte. To check whether row `i` is valid, the reader fetches byte `i / 8`, shifts right by `i % 8`, and tests the low bit. The example sets bits 0–4 (the first 5 rows are valid) and clears bit 5 (the sixth row is null). Bit indexing within a byte is little-endian by convention: bit 0 is the LSB. The output confirms row 3 is valid (bit 3 of byte 0 is set in `0b00011111`) and row 5 is not valid (bit 5 of byte 0 is clear in `0b00011111`)."
+prompt.program = """
+fn main() {
+    // Arrow validity bitmap: 1 bit per row, 8 rows per byte.
+    // First 5 rows are valid (bits 0..4 set), rows 5..7 are null.
+    let bitmap: [u8; 1] = [0b00011111];
+
+    fn is_valid(bitmap: &[u8], row: usize) -> bool {
+        let byte = bitmap[row / 8];
+        (byte >> (row % 8)) & 1 == 1
+    }
+
+    print!(
+        "valid[3]={} valid[5]={}",
+        is_valid(&bitmap, 3),
+        is_valid(&bitmap, 5),
+    );
+}
+"""
+id = "1315949a-3f13-4577-a34d-739bd0709c59"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Per page of the projected column chunks: decompress the page, decode it out of its encoding, and materialize the decoded values into Arrow buffers."
+prompt.distractors = [
+  "Per row of the table: parse the row's bytes, locate each projected column's value, and append the values to the Arrow arrays under construction.",
+  "Per row group of the table: load the entire row group into memory uncompressed and undecoded, then project the columns and skip the rest.",
+  "Per file: load the entire file into memory, decompress and decode every column chunk, then project the requested columns and discard the rest."
+]
+prompt.prompt = """
+A query reads two columns out of a 40-column Parquet file: the projection mask is set, the reader is built, and the result iterator is consumed. What work does the reader do at the Parquet-Arrow boundary, and at what granularity?
+"""
+context = "The Parquet-Arrow boundary work is per-page-of-each-projected-column-chunk. The reader does not touch unprojected column chunks — those bytes are never read from disk. For each projected chunk, the reader streams through its pages: decompress (e.g., ZSTD), decode (e.g., dictionary indices to values), and materialize into the in-progress Arrow buffers. Pages are the unit of streaming; the reader's memory footprint stays bounded by the page size, not the row group or file size. Per-row work would lose the columnar advantage; whole-row-group or whole-file work would defeat the streaming property."
+id = "d947ecaa-9ed6-4a86-b688-d6b470dc6cb8"

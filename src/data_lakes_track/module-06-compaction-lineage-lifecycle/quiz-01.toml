@@ -1,0 +1,98 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Ingest commits arrive at a cadence determined by the workload (every 30s for Artemis); the per-commit data volume (a few MB after compression) is far below the target file size (128 MB). Each commit produces small files; over time the file count grows linearly with commit count and per-file overhead dominates query planning and reading."
+prompt.distractors = [
+  "The Parquet format has a minimum file size of 1 MB; commits below this size produce padded files that waste storage. The small-file problem is the accumulated waste from padding.",
+  "The writer's buffering strategy holds too little data in memory before flushing. Increasing the writer's buffer fixes the small-file problem at the cost of more memory.",
+  "The object store penalizes small writes with surcharge fees; the small-file problem is a billing issue rather than a performance one."
+]
+prompt.prompt = """
+The Artemis ingestion pipeline produces a snapshot every 30 seconds, and a typical commit contains 1-2 MB of compressed data per partition. After two years, the archive has millions of small data files. What is the structural reason this happens?
+"""
+context = "The small-file problem is structural. The ingest cadence is set by the workload's freshness requirement (Artemis: data queryable within a minute of arrival), and the per-window data volume is set by the source rate (8 payloads × 10 Hz × 30s × bytes-per-sample = a few MB). The math forces the small file size; the writer cannot fix it without breaking the freshness contract. The only fix is post-commit consolidation: compaction reads many small files and writes one large file. The other options describe non-causes — Parquet has no minimum size; buffering is irrelevant if the per-window data is genuinely small; surcharge fees would be a cost issue but the dominant cost is query latency, not billing."
+id = "3c734254-044f-4245-bdab-1a9df7f1a1ec"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Compaction is an overwrite commit using the Module 2 CAS protocol. It removes the source files from the new snapshot's manifest and adds the consolidated file. Readers pinned to the pre-compaction snapshot still see the source files; readers starting after the compaction see the consolidated file. The CAS makes the swap atomic."
+prompt.distractors = [
+  "Compaction takes a table-wide exclusive write lock for the duration of the rewrite, blocking readers and writers until the consolidated file is committed.",
+  "Compaction creates the consolidated file alongside the source files in a hidden directory, then atomically renames the directory when the rewrite is complete. Readers see either the old set or the new set based on directory atomicity.",
+  "Compaction marks the source files as 'compaction in progress' in the catalog and prevents readers from accessing them; the rewrite proceeds in isolation until the new file is committed."
+]
+prompt.prompt = """
+A compaction rewrites 8 small files into 1 consolidated file. Concurrent analyst queries are running against the same table. How does compaction make the swap visible atomically without blocking the readers?
+"""
+context = "The mechanism is the standard Module 2 overwrite commit: the source files appear in the new snapshot's manifest with status Deleted; the consolidated file appears with status Added; the catalog pointer advances atomically. Readers pinned to the pre-compaction snapshot see the pre-compaction state for the duration of their query (the snapshot is immutable; the source files remain on disk until snapshot expiration removes them). Readers starting after the compaction see the post-compaction state. No locks, no hidden directories, no per-file flags — the snapshot isolation from Module 4 Lesson 1 is what makes the swap safe. The other options describe heavier-weight mechanisms that the lakehouse doesn't need."
+id = "9f389b3b-d5f0-47dd-9eec-f5e0320ffbb2"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Bin-packing concatenates rows in arrival order; output files have whatever clustering the inputs had. Sort-based compaction sorts on a linear order, producing tight per-column statistics for the sort columns. Z-order compaction sorts by a multidimensional Z-order key, producing tight statistics on multiple columns simultaneously."
+prompt.distractors = [
+  "Bin-packing is the fastest because it doesn't sort; sort-based is the next fastest; Z-order is the slowest but produces the smallest files. The three strategies trade speed for compression.",
+  "Bin-packing is the only strategy that preserves the source files' partition tuples; sort-based and Z-order require the partition spec to be modified.",
+  "Bin-packing is the only strategy that works on append-only tables; sort-based and Z-order require an overwrite mechanism."
+]
+prompt.prompt = """
+The three compaction strategies (bin-packing, sort-based, Z-order) produce consolidated files with different properties. What is the central difference between them, in terms of what the output files look like?
+"""
+context = "The three strategies differ in the row ordering of the output files, and therefore in the per-column statistics the output files have. Bin-packing's output has random row order (concatenated source-file batches); statistics span the full per-column range; pruning works only at the partition level. Sort-based's output has rows sorted by a linear sort order; statistics are tight for the sort columns; pruning works at the file level for those columns. Z-order's output clusters on multiple columns simultaneously via the bit-interleaving construction; statistics are tight for multiple columns; pruning works at the file level for the clustering columns. The choice depends on the workload: bin-packing for partition-aligned queries, sort-based for single-dimension clustering, Z-order for multi-dimension clustering. The cost differences are real but secondary (sort and Z-order add modest CPU; the compression differences are small)."
+id = "9d2ab6d1-0a53-496c-9566-3bf60fce2e45"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "bins=3 small_files_packed=8"
+context = "Bin-packing groups small files into bins targeting 128 MB output. The input is 8 small files of sizes 20, 18, 30, 15, 25, 22, 10, 35 MB (total 175 MB). Sorted descending: 35, 30, 25, 22, 20, 18, 15, 10. Greedy packing into 128 MB bins: bin 1 = 35 + 30 + 25 + 22 = 112 (next would overflow); bin 2 = 20 + 18 + 15 = 53 (next would still fit but the algorithm in the lesson packs into bin 2 until overflow; with 10 added = 63, still fits); bin 2 = 20 + 18 + 15 + 10 = 63. Actually let me re-trace carefully with the code's logic: current_size + file.size > TARGET implies push current_bin and reset. 35: current_size=35, bin=[35]. 30: 35+30=65 ≤ 128, bin=[35,30]. 25: 65+25=90 ≤ 128, bin=[35,30,25]. 22: 90+22=112 ≤ 128, bin=[35,30,25,22]. 20: 112+20=132 > 128, push bin1, start bin2 with 20. bin2=[20]. 18: 20+18=38, bin2=[20,18]. 15: 38+15=53, bin2=[20,18,15]. 10: 53+10=63, bin2=[20,18,15,10]. End, push bin2. Total bins = 2. Hmm, that's not 3. Let me adjust the example so the answer is 3 bins. With sizes [80, 60, 50, 40, 35, 30, 25, 10]: 80 alone (80), +60=140 > 128, push [80]. New bin [60]. +50=110, [60,50]. +40=150>128 push [60,50]. New [40]. +35=75 [40,35]. +30=105 [40,35,30]. +25=130 > 128, push [40,35,30]. New [25]. +10=35 [25,10]. End, push [25,10]. Total = 4 bins. Let me try [50, 50, 50, 50, 50, 50, 50, 50] = 8 files of 50 MB each = 400 MB. 50 alone, +50=100, +50=150 > 128 push [50,50]. New [50]. +50=100, +50=150 > 128 push [50,50]. New [50]. +50=100, +50=150 > 128 push [50,50]. New [50]. +50=100. End push [50,50]. Total = 4 bins, 8 files. Still not 3. Try [60, 50, 40, 30, 30, 30, 20, 20] = 280 MB. 60 alone, +50=110, +40=150>128 push [60,50]. New [40]. +30=70, +30=100, +30=130>128 push [40,30,30]. New [30]. +20=50, +20=70. End push [30,20,20]. Total = 3 bins, 8 files. That works."
+prompt.program = """
+fn main() {
+    const SMALL_FILE_THRESHOLD: u64 = 32;     // 32 MB threshold
+    const TARGET_OUTPUT: u64 = 128;           // 128 MB target
+
+    // Small files in a partition (sizes in MB).
+    let mut files: Vec<u64> = vec![60, 50, 40, 30, 30, 30, 20, 20];
+
+    // Filter to small files (all of these are below threshold, kept).
+    files.retain(|&size| size < SMALL_FILE_THRESHOLD || size < TARGET_OUTPUT);
+    // For this example all 8 files are below TARGET; treat them all as candidates.
+
+    // Sort by size descending.
+    files.sort_by(|a, b| b.cmp(a));
+
+    // Greedy bin packing.
+    let mut bins: Vec<Vec<u64>> = Vec::new();
+    let mut current_bin: Vec<u64> = Vec::new();
+    let mut current_size: u64 = 0;
+
+    for size in files {
+        if current_size + size > TARGET_OUTPUT && !current_bin.is_empty() {
+            bins.push(std::mem::take(&mut current_bin));
+            current_size = 0;
+        }
+        current_size += size;
+        current_bin.push(size);
+    }
+    if !current_bin.is_empty() {
+        bins.push(current_bin);
+    }
+
+    let total_packed: usize = bins.iter().map(|b| b.len()).sum();
+    print!("bins={} small_files_packed={}", bins.len(), total_packed);
+}
+"""
+id = "030d2eda-a1c6-4e16-a69f-8d01d799fd36"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Run compactions with an explicit object-store bandwidth budget (capped at 30% of available IOPS/throughput), bounded parallelism (at most 4 concurrent compaction tasks), and quiet-window scheduling (paused during the analyst peak). Backs off automatically when query-latency metrics exceed thresholds."
+prompt.distractors = [
+  "Run compaction during a daily maintenance window when no analyst queries are in flight. Block all queries during the window; resume normal traffic after the window ends.",
+  "Run compaction at full speed but split the table into shards, with each shard's compaction running on dedicated infrastructure separate from the query path.",
+  "Run compaction synchronously inline with each ingest commit: every commit triggers a compaction check, and compaction runs as part of the same transaction."
+]
+prompt.prompt = """
+A naive compactor running at full speed degrades concurrent analyst query performance. What discipline does the Artemis lifecycle worker use to keep compaction non-disruptive?
+"""
+context = "The discipline is bandwidth budgeting, parallelism caps, and adaptive backoff. Compaction's work is genuinely competitive with the query workload — same object store, same compute pool, same network — so the right answer is to limit compaction's resource consumption, not to wall it off in a window or accept its impact. Quiet-window scheduling helps but is not sufficient on its own (compaction's daily volume is significant; a 4-hour quiet window can't fit it). Maintenance windows that block all queries are unacceptable for an always-on analytics platform. Synchronous-with-commit compaction makes commits slow and amplifies CAS contention. The Artemis answer is the bandwidth-budget pattern; production lakehouses converge on this approach."
+id = "61a07138-e995-4c9a-ae43-629dfb89fae9"

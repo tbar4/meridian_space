@@ -1,0 +1,88 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The partition spec records (mission_id, day(sample_timestamp_ns)) in the snapshot's partition_spec field, and each new data file's manifest entry records the partition value tuple it belongs to. Directory layout is incidental — the metadata is the source of truth."
+prompt.distractors = [
+  "The data files are physically organized under /mission_id=X/day=Y/ subdirectories in the object store; readers infer the partition from the path.",
+  "The partition is encoded as the leading bytes of each data file's content-addressed filename; readers parse the filename to recover the partition.",
+  "The table catalog maintains a separate partition-index table mapping (mission, day) tuples to data file paths; readers consult the index before reading."
+]
+prompt.prompt = """
+The Artemis SDA observation table is partitioned by (mission_id, day(sample_timestamp_ns)). How does the table format physically represent this partitioning?
+"""
+context = "Iceberg-style partitioning stores the partition spec in the snapshot metadata and the per-file partition value in the manifest entry. Data file paths can be anything — content-addressed, named after their commit ID, organized by directory, whatever the writer chooses. The metadata is the source of truth; the file system organization is incidental. This is the difference from Hive-era directory partitioning, where the directory path encoded the partition value and the table layout was constrained to a specific filesystem convention."
+id = "cb1e9d39-0f8e-4688-ae5c-cd25443c95b7"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Identity partitioning produces a partition per distinct timestamp value — billions of partitions, almost all of which contain a handful of rows. The metadata cost exceeds the data cost; queries pay an O(partition_count) cost for negligible pruning benefit."
+prompt.distractors = [
+  "Identity partitioning produces overlapping ranges per partition; queries cannot prune effectively because the bounds are noisy.",
+  "Identity partitioning's hash function is too slow for high-cardinality columns; the day() transform is required for performance.",
+  "Identity partitioning duplicates the timestamp value in both the data file and the manifest entry, doubling the metadata storage cost."
+]
+prompt.prompt = """
+A junior engineer proposes partitioning the Artemis telemetry table by `identity(sample_timestamp_ns)` rather than `day(sample_timestamp_ns)`. Why is this a structural mistake?
+"""
+context = "The small-file problem is the central failure mode of over-partitioning. A column with billions of distinct values, partitioned by identity, produces billions of partitions — each one a manifest entry, each one typically a separate data file, each one carrying metadata overhead that quickly exceeds the actual data. The day() transform collapses the timestamp space to ~1000 distinct partitions per mission (one per day), keeping the per-partition data size in the operationally-tractable range. The transform is what makes a high-cardinality time column tractable; identity is structurally wrong for this case."
+id = "e944658b-230c-4afe-89e5-f5786d3667d6"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Iceberg's hidden partitioning derives the partition predicate from the source-column predicate using the partition spec's transform metadata. The query writes the natural source predicate; the planner translates it to a partition predicate. Hive-era partitioning required the analyst to know the partition column and reference it explicitly."
+prompt.distractors = [
+  "Iceberg stores both the source value and the partition value in the data file, allowing readers to filter on either at no cost. Hive only stored the partition value, requiring the partition to be in the query.",
+  "Iceberg uses a separate partition-index file that maps source-column predicates to data files. Hive used the directory structure, which was less flexible.",
+  "Iceberg requires queries to reference the partition column by its hidden name (e.g., `mission_id_partition`). Hive used the natural column name. The Iceberg approach is faster but less ergonomic."
+]
+prompt.prompt = """
+A query against the Artemis SDA table filters `WHERE sample_timestamp_ns >= '2024-03-01' AND sample_timestamp_ns < '2024-03-08'`. The table is partitioned by `day(sample_timestamp_ns)`. The analyst does not explicitly mention `day` in the predicate. Why does the query still prune partitions?
+"""
+context = "Hidden partitioning is the Iceberg innovation worth knowing. The partition spec lives in the snapshot metadata; the query writes the predicate on the source column (`sample_timestamp_ns >= '2024-03-01'`); the planner derives the partition predicate (`day_partition >= '2024-03-01'`) using the transform metadata. The query is decoupled from the storage layout. Schema/partition-spec changes do not require query rewrites. This is impossible in Hive's directory-based scheme, where the partition column had to be explicitly referenced for pruning to work."
+id = "2ba96718-46c7-4929-b480-16300800de5f"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "n_partitions=12 ok=true"
+context = "The number of partitions produced is the product of the cardinalities of the partition fields after transform. mission_id is identity-partitioned with 3 distinct values (apollo-3, apollo-4, apollo-5); day() collapses each row's timestamp to its day, producing 4 distinct days across the sample. The Cartesian product is 3 * 4 = 12 partitions. Real telemetry data is non-uniform — not every mission has data on every day — so the actual partition count is typically less than the Cartesian product. The example checks the structural count; a check against actual data would intersect with which (mission, day) tuples are non-empty."
+prompt.program = """
+use std::collections::HashSet;
+
+fn main() {
+    // Sample rows: (mission_id, day_id derived from sample_timestamp_ns)
+    let rows: Vec<(&str, u32)> = vec![
+        ("apollo-3", 100), ("apollo-3", 101), ("apollo-3", 102),
+        ("apollo-4", 100), ("apollo-4", 101), ("apollo-4", 102),
+        ("apollo-5", 100), ("apollo-5", 101), ("apollo-5", 102),
+        ("apollo-3", 103), ("apollo-4", 103), ("apollo-5", 103),
+    ];
+
+    // Distinct partition tuples = distinct (mission_id, day_id) pairs.
+    let partitions: HashSet<(&str, u32)> = rows.iter().copied().collect();
+    let n_partitions = partitions.len();
+
+    // The Cartesian-product upper bound: distinct missions * distinct days.
+    let missions: HashSet<&str> = rows.iter().map(|(m, _)| *m).collect();
+    let days: HashSet<u32> = rows.iter().map(|(_, d)| *d).collect();
+    let max_partitions = missions.len() * days.len();
+
+    let ok = n_partitions == max_partitions;
+
+    print!("n_partitions={} ok={}", n_partitions, ok);
+}
+"""
+id = "bbae984d-629c-4380-89cc-e7ecf896395d"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Bucket partitioning hashes the value into one of N buckets, producing a fixed N-cardinality partition column from a high-cardinality source. The fixed count caps metadata overhead; the cost is that range predicates on the source column cannot prune (hashing destroys order), so bucket partitioning is correct only for equality-queried columns."
+prompt.distractors = [
+  "Bucket partitioning sorts the values into N evenly-sized buckets by value range. Range predicates prune well because the bucket boundaries are monotonic; the cost is that the bucketing must be recomputed when new data extends the value range.",
+  "Bucket partitioning chooses N values at random per commit and partitions by them. The randomness produces good load balance across writers; the cost is unpredictable partition counts across commits.",
+  "Bucket partitioning groups values by their first N characters (for strings) or their N-most-significant bits (for numbers). Range and equality predicates both prune; the cost is a possibly-uneven distribution if the data clusters at the boundary."
+]
+prompt.prompt = """
+The bucket(N, column) partition transform is the standard tool for partitioning by a high-cardinality column. What does it do, and what is its cost?
+"""
+context = "The bucket transform hashes (typically Murmur3 in Iceberg) the source value modulo N. The output is an integer in [0, N) regardless of the source's cardinality, which makes partition counts predictable and tractable. The cost is the loss of order: two source values close in their natural ordering may hash to different buckets, and the lifting rules cannot translate range predicates through the hash. Bucket partitioning is the right tool for high-cardinality columns queried with equality (user_id, request_id, payload_id with point-lookups); it is the wrong tool for columns queried with ranges (timestamps, monotonic sequence numbers)."
+id = "50347e9a-deb3-4ac8-a14e-9beb3d20c99c"

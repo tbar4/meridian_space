@@ -1,0 +1,87 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Captures the snapshot ID at planning time. After that, every read of metadata files and data files uses paths derived from the captured snapshot, not the catalog's current state. The catalog can advance freely during the query; the query continues to read against its captured snapshot."
+prompt.distractors = [
+  "Acquires a read lock on the catalog row for the duration of the query. Other queries can read but not modify the catalog until the lock is released.",
+  "Records the query's start timestamp and rejects any reads whose data files have a modified time after that timestamp. The reader returns an error if the table mutates during the query.",
+  "Maintains a per-query copy of the table's manifest list in memory. Subsequent reads consult the in-memory copy regardless of object-store state."
+]
+prompt.prompt = """
+A query against a lakehouse table 'pins' a snapshot at the start of execution. What does the pin protocol concretely do?
+"""
+context = "The pin protocol is a one-time catalog read at query start. After that, the query's state contains the snapshot ID and the snapshot metadata path; subsequent reads go straight to those paths in the object store. The query never re-consults the catalog and never blocks any writer. The catalog can advance to S+1, S+2, ... while the query runs against S; the query continues to read consistent data because the snapshot's metadata and data files are immutable. Locking, modification-time checks, and in-memory copies all describe heavier-weight mechanisms that the lakehouse doesn't need — the structural immutability does the work for free."
+id = "2cbf2459-a16f-4763-803a-6bb81288ccd3"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Snapshot isolation guarantees that each query sees a consistent point-in-time view. It does not guarantee that two related queries see the same view: each query pins independently and can see a different snapshot. The fix is to share a snapshot ID across the related queries."
+prompt.distractors = [
+  "Snapshot isolation guarantees serializable execution: any set of read-only queries against the lakehouse produces results equivalent to some serial execution.",
+  "Snapshot isolation guarantees linearizability: every query reads the snapshot that was committed just before the query started, with no possibility of seeing a stale snapshot.",
+  "Snapshot isolation guarantees write atomicity but not read consistency: two reads in the same query may see different snapshots if a commit occurs between them."
+]
+prompt.prompt = """
+What does snapshot isolation guarantee in the lakehouse context, and what does it explicitly NOT guarantee?
+"""
+context = "Snapshot isolation is a per-query guarantee, not a cross-query guarantee. Each query pins independently; two queries started at slightly different moments can pin different snapshots and see different states. For analytical workloads this is rarely an issue — queries are independent — but it matters for any workflow that runs two queries and relies on cross-query consistency. The fix is to pass a shared snapshot ID across the related queries (the Artemis tooling supports a --pin-snapshot flag for this). Within a single query, snapshot isolation does guarantee read consistency: every read inside the query uses the pinned snapshot. The 'write atomicity but not read consistency' option is the inverse of what the protocol provides; serializability and linearizability are strictly stronger guarantees that the lakehouse does not provide."
+id = "efdeeea1-d10a-4330-829b-27359eba26ca"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The snapshot expiration job (Module 6) physically deletes the snapshot's metadata and data files after the retention window. Queries that pinned the snapshot before expiration see in-flight reads fail with 'object not found' when they try to read files that have been deleted."
+prompt.distractors = [
+  "The snapshot is kept alive automatically as long as any query holds a pin. The expiration job consults a reference count of active pins and skips snapshots with non-zero refs.",
+  "The snapshot is migrated to a long-retention archive tier when expiration runs; pinned queries automatically fall through to the archive tier without disruption.",
+  "The expiration job never runs; snapshots remain on disk indefinitely. Storage costs grow linearly with the table's commit history."
+]
+prompt.prompt = """
+A long-running replay query pins a snapshot from 25 days ago. The table's snapshot-expiration retention window is 30 days. The query is expected to take 8 hours. What is the failure mode if the query duration approaches or exceeds the retention window during execution?
+"""
+context = "The interaction between pin and expiration is the lakehouse's analog of MVCC garbage-collection horizons. The expiration job runs unconditionally on a schedule; it does not consult active query pins (the operational complexity of tracking distributed pins is not worth the benefit, and the retention window is typically set well above the longest expected query duration). Queries that exceed the window see in-flight read failures and must be retried against newer snapshots — or, for accident-investigation use cases, fall through to the long-retention cold-archive tier accessed via a separate, slower read path. The 'reference count' and 'auto-migrate' designs describe heavier-weight mechanisms; the actual production discipline is 'set the window long, time out queries inside it.'"
+id = "f9ff646e-0d5e-46b5-9377-ceca6d30f684"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "after_commit=true catalog_advanced=true"
+context = "The pin protocol is `read the catalog once, then use the captured snapshot ID for the rest of the query.` The example simulates this with an atomic catalog state. Worker captures `pinned = 100` at start. The catalog advances to 105 (simulating concurrent commits). Worker still has pinned = 100. The assertion is twofold: (1) the worker's pinned snapshot is unchanged after the catalog advances; (2) the catalog has indeed moved past the worker's pin. This is the structural property that makes snapshot isolation work — the pin is captured-by-value, not captured-by-reference."
+prompt.program = """
+use std::sync::atomic::{AtomicU64, Ordering};
+
+fn main() {
+    let catalog = AtomicU64::new(100);
+
+    // Worker pins the current snapshot at the start of its query.
+    let pinned = catalog.load(Ordering::SeqCst);
+
+    // Other writers commit during the worker's query; the catalog advances.
+    catalog.store(101, Ordering::SeqCst);
+    catalog.store(102, Ordering::SeqCst);
+    catalog.store(105, Ordering::SeqCst);
+
+    // The worker's captured pin is unchanged by subsequent commits.
+    let pin_after = pinned;
+    let catalog_now = catalog.load(Ordering::SeqCst);
+
+    print!(
+        "after_commit={} catalog_advanced={}",
+        pin_after == 100,
+        catalog_now > pin_after,
+    );
+}
+"""
+id = "74a40b8d-e93a-474f-984b-c627f0bd6d9e"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Snapshot IDs are immutable inputs: two runs against the same snapshot ID see identical data files. A regression observed against a fixed snapshot ID isolates the cause to the planner or storage layer — not to workload shift. Including the snapshot ID in log lines makes regressions diagnosable by correlation."
+prompt.distractors = [
+  "Snapshot IDs are required by the access-control system to authorize reads; including them in logs is for audit compliance.",
+  "Snapshot IDs are sequential and shorter than file paths; logging them saves disk space and parsing time.",
+  "Snapshot IDs are stable across catalog migrations; logging them makes cross-catalog query comparisons possible during database upgrades."
+]
+prompt.prompt = """
+The Artemis observability stack includes the pinned snapshot ID in every query's log lines. Why is this specifically valuable for performance regression analysis?
+"""
+context = "The snapshot ID is the right diagnostic identifier because it identifies the *input* to the query. A query that takes 10 minutes against snapshot 4729 last week and takes 20 minutes against snapshot 4729 this week has a real regression — the input is identical, so the slowdown must come from the planner, the storage layer, or the runtime. A query that took 10 minutes against snapshot 4729 and takes 20 minutes against snapshot 5012 might just have a larger input (more rows or more files). Distinguishing these cases requires the snapshot ID in the logs; otherwise the operator has no way to compare apples to apples. Authorization, log size, and cross-catalog comparison are not the primary reasons (though some of them are real secondary benefits)."
+id = "2cf7f5c4-66e4-4d40-a699-d33cee66930c"

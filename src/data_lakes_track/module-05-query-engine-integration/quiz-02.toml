@@ -1,0 +1,88 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Arrow IPC serializes the in-memory Arrow buffer layout directly: the receiver allocates the buffers and memcpys the wire bytes into them, producing a usable RecordBatch with no per-row reconstruction or per-column type-specific decoding."
+prompt.distractors = [
+  "Arrow IPC compresses better than other formats because of its column-oriented layout; the bandwidth savings compound across long-distance transfers.",
+  "Arrow IPC has a smaller schema overhead than other formats; the saved bytes per batch matter at very high message rates.",
+  "Arrow IPC is the only format that supports the dictionary encoding the lakehouse uses internally; other formats lose information at the wire boundary."
+]
+prompt.prompt = """
+Arrow IPC is the standard wire format for engine-to-storage data transport in lakehouses. What's the central reason?
+"""
+context = "The single biggest advantage of Arrow IPC over row-oriented wire formats (JSON, MessagePack, Protobuf) is decode cost. Arrow IPC is the in-memory format serialized as-is, so the receiver's decode is essentially memcpy from network buffer to Arrow buffer. Row-oriented formats require the receiver to reconstruct rows, decode types, and rebuild columnar layouts — work proportional to the data size. At 100 GB query results, this is the difference between 100 GB of CPU spent on decode (row formats) and a few hundred microseconds per batch (Arrow IPC). The other distractors describe properties that are partly true (some compression advantage exists; dictionary support is good) but are secondary to the decode-cost win."
+id = "b25164d3-5bee-4b31-b181-1ca6cc996064"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "One Schema message sent at the start of the stream, then zero or more RecordBatch messages (each conforming to the schema), then an EndOfStream marker. Dictionary messages may be interleaved for dictionary-encoded columns."
+prompt.distractors = [
+  "One message per batch, each containing both the schema and the batch data. The schema is repeated per batch to support schema evolution mid-stream.",
+  "A pair of metadata + data files: the metadata file contains the schema and an index of batches; the data file contains the concatenated batch buffers.",
+  "A directory of files: one per batch, plus a manifest file at the top level listing them. The receiver reads the manifest and downloads the batches in parallel."
+]
+prompt.prompt = """
+The Arrow IPC streaming protocol is a sequence of messages over a transport. What is the message sequence for a typical query result?
+"""
+context = "The IPC streaming protocol is schema-once-then-batches-once-EOS. The schema is sent at the start because it tells the receiver how to interpret every batch that follows; sending it per batch would be redundant. The EndOfStream marker tells the receiver no more batches are coming. Dictionary batches are interleaved because they must arrive before the first batch that references them. This single-schema, multi-batch pattern is what makes the protocol cheap: decoder state is allocated once, then batches are decoded in a tight loop. The 'one message per batch' and 'directory of files' alternatives describe other protocols (some HTTP APIs, some file-based exchange formats) that don't have the streaming-decode property."
+id = "fef4ac5a-00e3-4783-8488-aba82c95665e"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The stream's poll-based semantics: the producer doesn't read the next batch until the consumer pulls. If the consumer is slow, the producer pauses; if the consumer drops batches as soon as it processes them, memory stays constant at one-batch-in-flight."
+prompt.distractors = [
+  "The receiver explicitly allocates a fixed-size buffer pool; batches are read into the pool and dropped when the pool is full. Producer rate-limiting is configured explicitly.",
+  "The IPC protocol includes a per-batch CRC check that fails if memory pressure exceeds a threshold; producers stop sending until pressure drops.",
+  "The protocol does not bound memory — applications are expected to buffer the entire result set and apply memory pressure handling at the application layer."
+]
+prompt.prompt = """
+A query produces 500 GB of result data. The engine streams the result through Arrow IPC. The receiver's resident memory stays under 2 GB. What property of the protocol makes this work?
+"""
+context = "The streaming protocol is inherently flow-controlled because batches arrive one at a time and the receiver processes them serially. A consumer that processes-and-drops each batch holds at most one batch in memory plus whatever the downstream operators retain. The producer's reading is driven by the consumer's pulling — if the consumer is slow, the producer pauses on the network/disk write until the consumer drains the buffer. This is the same property the `RecordBatchStream` type provides in-process: implicit flow control via poll-based stream semantics. No explicit buffering, no rate limiting, no flow-control protocol on top of the data protocol — the streaming-decode discipline is what makes it work."
+id = "624d8e48-82e9-4b26-844c-3abb6885c984"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "schema_messages=1 batch_messages=4 eos=1"
+context = "The IPC streaming protocol structure: one schema message at the start, one record-batch message per batch, one EOS marker at the end. The example simulates this counting: increment schema_messages on the first iteration's special-cased emission; increment batch_messages once per batch; emit one EOS at the end. For 4 batches: 1 schema + 4 batches + 1 EOS. The protocol guarantees exactly one schema message per stream (the schema is sent once; every batch conforms to it); the batch count equals the number of batches in the result; the EOS count is exactly one."
+prompt.program = """
+fn main() {
+    // Simulate emitting an IPC stream of N record batches.
+    let batches = 4;
+
+    let mut schema_messages = 0u32;
+    let mut batch_messages = 0u32;
+    let mut eos = 0u32;
+
+    // Stream prefix: emit the schema message exactly once.
+    schema_messages += 1;
+
+    // Stream body: emit one RecordBatch message per batch.
+    for _ in 0..batches {
+        batch_messages += 1;
+    }
+
+    // Stream suffix: emit the EndOfStream marker.
+    eos += 1;
+
+    print!(
+        "schema_messages={} batch_messages={} eos={}",
+        schema_messages, batch_messages, eos,
+    );
+}
+"""
+id = "662db8ca-a743-4ad1-9c68-70081ec3f441"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Wire-layer field-ID-based projection. The IPC schema's column metadata carries the Iceberg field_id; the engine uses these IDs to map incoming columns against its target schema, applying the same renaming, null-filling, and dropping logic that file-layer projection uses."
+prompt.distractors = [
+  "A separate wire-layer schema-translation protocol. Before the data stream, the engine and storage exchange a schema-mapping message that lists how to translate the storage's schema to the engine's target schema.",
+  "Pre-projection at the storage layer. The storage rewrites batches to match the engine's expected schema before sending; the wire format never sees the original schema.",
+  "A post-stream schema-correction phase. The engine collects all batches, then applies a single bulk-projection operation against the collected data."
+]
+prompt.prompt = """
+A time-travel query reads data from a snapshot when the schema had different column names than the current schema. The Arrow IPC stream from storage uses the snapshot-time schema. How does the engine project this against its target schema?
+"""
+context = "Field-ID-based projection generalizes from the file layer (Module 4 Lesson 3) to the wire layer. The IPC schema message's per-column metadata includes the Iceberg field_id annotation; the engine reads this metadata and maps columns by ID rather than by name. This handles renames (the column appears under a new name in the engine's target schema; same field_id, no problem), null-fills (the wire schema lacks a column the engine wants; the engine adds a null column), and column drops (the wire schema has a column the engine doesn't want; the engine ignores it). The mechanism is identical to file-layer projection; the data flows through the same projection logic regardless of whether it came from a Parquet file or an IPC stream. The other options describe heavier mechanisms that aren't necessary because the IPC schema metadata already carries enough information."
+id = "7c7933c2-4464-4254-ad4d-399e27acaa5b"

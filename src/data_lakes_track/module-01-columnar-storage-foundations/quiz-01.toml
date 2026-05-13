@@ -1,0 +1,76 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The reader fails because the footer length and offsets it needs are never written. The partial file is unreadable as Parquet."
+prompt.distractors = [
+  "The reader succeeds and reads all row groups that were successfully flushed before the crash.",
+  "The reader succeeds but treats every column as having unknown statistics, disabling predicate pushdown.",
+  "The reader succeeds and reads up to the last fsync'd page boundary; everything after is silently truncated."
+]
+prompt.prompt = """
+The Artemis ingestion pipeline writes Parquet files to disk. A process crash interrupts the writer after several row groups have been flushed to disk, but before `ArrowWriter::close()` returns. What happens when a reader subsequently opens the partial file?
+"""
+context = "The Parquet footer holds the offsets of every page in every column chunk, plus the schema and statistics. Without it, the reader has no way to locate any data. The four-byte trailing magic and four-byte footer length are written only inside the writer's `close()` call. This is the structural reason the Artemis ingestion pipeline writes to `.parquet.inprogress` and renames on `close()` success — readers see only complete files."
+id = "a9485684-a3ae-46d9-86e5-2d6337ced80b"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Smaller row groups: tighter per-chunk min/max ranges prune more aggressively against `mission_id` and `payload_id` predicates."
+prompt.distractors = [
+  "Larger row groups: better compression ratios reduce the bytes scanned per row group.",
+  "Smaller row groups: smaller page sizes reduce decompression cost per query.",
+  "Larger row groups: fewer footers to parse across the file means lower planning overhead."
+]
+prompt.prompt = """
+The Artemis archive's analyst workload runs many queries of the form `WHERE mission_id = ? AND payload_id = ?`. The current row group size is 1 GB. The team is considering reducing it to 128 MB to improve query performance. Which property of the change drives the pruning improvement?
+"""
+context = "Predicate pushdown operates on the per-column-chunk min/max statistics in the footer. The smaller the row group, the narrower the range of values in each chunk, and the more often a predicate falls fully outside a chunk's range — letting the reader skip the entire chunk. Compression ratio improves modestly with larger row groups, but the question asks specifically about pruning, which is a statistics-granularity property, not a compression property."
+id = "a8f64957-dea2-46b4-821b-3101031803f9"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The query reads only the column chunks for `temperature_c`, one per row group, locating each chunk via its footer-recorded file offset."
+prompt.distractors = [
+  "The query reads each row group sequentially, decoding all columns and discarding the columns not selected.",
+  "The query reads the first page of every column chunk to determine which columns are needed, then reads the remaining pages of the selected column.",
+  "The query reads the dictionary pages of every column chunk to look up `temperature_c` in the per-column schema, then reads its values."
+]
+prompt.prompt = """
+A query against an Artemis Parquet file selects one column (`temperature_c`) from a 40-column schema. The file has 30 row groups. Assuming no predicate-driven row-group pruning, how does the reader execute this query?
+"""
+context = "Column-projection is what makes Parquet's columnar layout pay off. The reader consults the footer to find the file offset and compressed size of every `temperature_c` column chunk, issues bounded reads against only those byte ranges, decodes the pages, and emits the values. The other 39 column chunks per row group are never read. This is the property the Artemis migration captured to go from 20-minute queries on JSONL to seconds on Parquet."
+id = "3f52abd8-bff6-4edd-9aed-1af5e56d527e"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "footer_len=42 magic_ok=true"
+context = "The example simulates Parquet's trailer layout: the last 8 bytes of the file are a 4-byte little-endian footer length followed by the 4-byte `PAR1` magic. A real reader does exactly this read against an opened file: seek to file_size - 8, read 8 bytes, decode the length from the first 4, verify the magic on the last 4. The footer itself is then at `[file_size - 8 - footer_len, file_size - 8)`."
+prompt.program = """
+fn main() {
+    // Simulate the last 8 bytes of a Parquet file:
+    // 4 bytes little-endian footer length, then `PAR1` magic.
+    let trailer: [u8; 8] = [42, 0, 0, 0, b'P', b'A', b'R', b'1'];
+
+    let footer_len = u32::from_le_bytes(
+        [trailer[0], trailer[1], trailer[2], trailer[3]]
+    );
+    let magic_ok = &trailer[4..8] == b"PAR1";
+
+    print!("footer_len={} magic_ok={}", footer_len, magic_ok);
+}
+"""
+id = "759b1aef-0c57-4b39-a9c8-8d0de7676fac"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Filter pushdown using row-group min/max statistics, which prunes row groups whose `panel_voltage` range falls entirely outside `[28.5, ∞)`."
+prompt.distractors = [
+  "Page-level RLE decoding, which skips runs of values that fall outside the filter range without materializing them.",
+  "Dictionary-page inspection, which checks whether `28.5` is in the dictionary for the column chunk.",
+  "Bloom-filter probing, which determines whether any value in `[28.5, ∞)` is present without reading the column data."
+]
+prompt.prompt = """
+An Artemis query reads `WHERE panel_voltage > 28.5`. The query engine wants to read as few bytes from disk as possible. Which Parquet feature does the engine use to skip entire row groups?
+"""
+context = "The footer's per-column-chunk statistics include min and max values. A query for `panel_voltage > 28.5` reads the footer, checks each row group's `panel_voltage` chunk: if `max ≤ 28.5`, the entire row group is skipped. This is the standard Parquet row-group pruning path and the reason statistics are nearly always worth enabling on numeric columns. Bloom filters exist in Parquet but answer membership questions, not range questions; dictionary pages don't help with arbitrary numeric ranges; RLE skipping operates within a page, not at row-group granularity."
+id = "c7f552d5-b6fe-4798-b726-f8e4d3c32782"

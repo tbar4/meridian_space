@@ -1,0 +1,85 @@
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The reader's listing may include or exclude in-flight files non-deterministically, producing different result sets for two consecutive queries without any 'table change' the user can identify."
+prompt.distractors = [
+  "The reader's listing returns the wrong byte offsets within each file because the listing is computed before the writes finish.",
+  "The reader's listing is correct but slow because object stores serialize listings against writes.",
+  "The reader's listing succeeds but the subsequent reads fail with checksum errors because the writer has not yet flushed."
+]
+prompt.prompt = """
+A query against a raw-directory data lake (no table format) lists the object store, reads every Parquet file, and unions the results. A writer is concurrently dropping new files. What is the specific consistency problem the reader encounters?
+"""
+context = "The directory-as-table pattern has no notion of a 'table version' the reader can pin against. The listing operation is independent of in-flight writes and produces whatever set of objects happens to be visible at the moment the listing's pagination cursor walks the bucket. Two consecutive queries can see different file sets purely because the listing was issued at different moments — not because the table conceptually changed. The fix is the table format's explicit, atomic membership: a snapshot ID pins the file set."
+id = "fea39c16-a018-43d7-9ef2-c02f4a2a2820"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "A multi-file commit is atomically visible only after the catalog pointer swaps to a new snapshot that references all twelve files. Until the swap, readers see the old snapshot's file set; after the swap, the new file set. There is no intermediate state."
+prompt.distractors = [
+  "Each file is written individually via the rename pattern, and readers see files in the order they were committed. As long as files are written in dependency order, partial states are not observable.",
+  "The writer holds an exclusive table-level lock during the twelve-file commit, blocking readers until all files are visible. Readers wait for the lock before proceeding.",
+  "The table format guarantees eventual consistency: readers eventually see all twelve files, but during the commit window may see any subset of them in any order."
+]
+prompt.prompt = """
+The Artemis ingestion pipeline runs a batch job that writes twelve new Parquet files for one downlink session. How does the table format make all twelve files visible to readers atomically — neither all-or-nothing per file, but all-or-nothing across the twelve?
+"""
+context = "Atomic multi-file visibility is what differentiates a table format from raw Parquet. The mechanism is indirection through metadata: the writer produces all twelve data files (each individually atomic via the rename pattern), produces a new metadata snapshot listing the table's now-complete file set, and atomically swaps the catalog pointer. Readers consult the catalog to find the current snapshot; the snapshot is either the old one (twelve files invisible) or the new one (all twelve visible). No locking, no ordering dependency, no eventual consistency."
+id = "528f10e2-780c-422d-9379-cc17b0f5bfa5"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "The reader rejects the file based on a schema-compatibility check against the table's metadata schema. The data file's schema is irrelevant; the table's metadata is the source of truth, and incompatible files are flagged for quarantine, not silently included."
+prompt.distractors = [
+  "The reader unions all observed schemas across the files and produces a result with nulls for missing columns. This is the standard 'schema-on-read' approach.",
+  "The reader picks the most common schema across the files and rejects files whose schema differs. This is majority-vote schema enforcement.",
+  "The reader retries the read with each plausible schema until one succeeds. This is opportunistic schema inference."
+]
+prompt.prompt = """
+The Artemis legacy archive accumulated nine variants of the telemetry schema over six years. In the new table-format-managed archive, what happens when a reader encounters a data file whose schema does not match the table's current schema?
+"""
+context = "Schema drift — multiple incompatible schemas accumulating in the same directory — is the dominant long-term failure mode of raw data lakes. The table format fixes it by making the table's schema explicit metadata. The reader consults the metadata schema, projects compliant files against it (with nulls for columns added since the file was written), and rejects files whose types or required fields don't match. The metadata schema is the truth; the file schemas are file-internal storage details. The other options describe heuristics that quietly produce incorrect results — exactly the failure mode the table format exists to prevent."
+id = "4f7a84db-4369-4326-ad25-2a7c2da5c6fa"
+
+[[questions]]
+type = "Tracing"
+answer.doesCompile = true
+answer.stdout = "snapshot_files=[0, 1, 2, 3, 4, 5] expected=true"
+context = "A snapshot is a frozen list of file IDs at a point in time. Once captured, the snapshot is independent of subsequent table mutations: new files added or old files removed do not affect the snapshot's view. This is what makes time-travel queries and concurrent reads cheap — readers hold the snapshot they started with and read against it; the table's current state is irrelevant to in-flight reads. The example mutates `current_files` after capturing `snapshot`; `snapshot` is unchanged, demonstrating the immutability property."
+prompt.program = """
+fn main() {
+    // Simulate a snapshot of the table's file membership at one point in time.
+    let mut current_files: Vec<u32> = vec![0, 1, 2, 3, 4, 5];
+
+    // Capture a snapshot: a frozen list of file IDs at this moment.
+    let snapshot = current_files.clone();
+
+    // The table mutates: new commits add and remove files.
+    current_files.push(6);
+    current_files.push(7);
+    current_files.retain(|&id| id != 2);
+
+    // A reader holding the snapshot still sees the original file set.
+    let expected: Vec<u32> = vec![0, 1, 2, 3, 4, 5];
+
+    print!(
+        "snapshot_files={:?} expected={}",
+        snapshot,
+        snapshot == expected,
+    );
+}
+"""
+id = "f07fd43f-6a36-4370-a9af-360e651a0ff7"
+
+[[questions]]
+type = "MultipleChoice"
+answer.answer = "Stop referencing the files from the new metadata snapshot, leave the data on disk for a retention window, and physically delete the files only after the window has elapsed and no reader still needs the old snapshot."
+prompt.distractors = [
+  "Issue the object-store delete immediately when the new metadata snapshot is committed; readers that fail with 'object not found' retry against the new snapshot.",
+  "Hold an exclusive lock on each file being deleted until all in-flight readers have finished, then delete. The lock prevents reader failures.",
+  "Mark the files as 'tombstoned' in the metadata; readers skip tombstoned files at read planning time, and a maintenance job eventually rewrites the metadata without them."
+]
+prompt.prompt = """
+A compaction job rewrites fifty small Parquet files into five large ones and needs to remove the originals. Concurrent readers are scanning the old files. How does the table format handle the deletes safely?
+"""
+context = "Decoupling visibility from physical storage is the table-format discipline that protects concurrent readers from delete-induced read failures. The new snapshot stops referencing the deleted files; the catalog pointer swap is the only visibility-affecting operation. Existing readers holding the old snapshot continue to read against it normally. Physical deletion runs on a separate retention schedule (Module 6) long enough that no reader can still be using the old snapshot. The immediate-delete option produces user-visible failures; the locking option recreates the pessimistic-lock problems the table format exists to avoid; the tombstone option conflates the metadata commit with the physical delete and unnecessarily complicates read planning."
+id = "39b61087-0adf-4930-840f-087934c9f185"
