@@ -15,6 +15,9 @@ cache-answers = true
 playground.editable = true
 additional-css = []
 additional-js = []
+mathjax-support = true
+fold.enable = true
+level = 0 
 
 [preprocessor.toc]
 command = "mdbook-toc"
